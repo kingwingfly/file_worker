@@ -1,97 +1,197 @@
+use base64::Engine;
+use rsa::{pkcs1v15::Pkcs1v15Sign, RsaPublicKey};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use worker::*;
 
-/// JWT claims from Cloudflare Access
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct AccessClaims {
-    pub email: Option<String>,
-    pub sub: Option<String>,
-    pub exp: Option<u64>,
-    pub iat: Option<u64>,
-    pub aud: Option<Vec<String>>,
-    pub iss: Option<String>,
-    pub identity_nonce: Option<String>,
-    pub custom: Option<serde_json::Value>,
-}
+// ── base64url engine (no padding) ──
+const B64: base64::engine::GeneralPurpose =
+    base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-/// JWKS key from Cloudflare Access certs endpoint
+// ── KV cache config ──
+const JWKS_BINDING: &str = "JWKS_CACHE";
+const JWKS_KEY: &str = "jwks";
+const JWKS_TTL: u64 = 3600; // 1 hour
+
+// ── Types ──
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct JwksKey {
+struct Jwk {
     kid: String,
-    kty: String,
-    alg: String,
-    r#use: String,
     n: String,
     e: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct JwksResponse {
-    keys: Vec<JwksKey>,
+struct Jwks {
+    keys: Vec<Jwk>,
 }
 
-/// Verify the Cloudflare Access JWT from the request.
-///
-/// Returns `Ok(AccessClaims)` if valid, or an error response.
-pub async fn verify_access_jwt(req: &Request, ctx: &RouteContext<()>) -> Result<AccessClaims> {
-    // Extract JWT from Cf-Access-Jwt-Assertion cookie
-    let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+#[derive(Debug, Deserialize)]
+struct JwtHeader {
+    kid: String,
+    alg: String,
+}
 
-    let jwt = extract_cookie(&cookie_header, "CF_Authorization")
-        .ok_or_else(|| worker::Error::RustError("missing CF_Authorization cookie".into()))?;
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct AccessClaims {
+    #[serde(default)]
+    pub aud: serde_json::Value,
+    pub iss: String,
+    pub exp: u64,
+    pub nbf: Option<u64>,
+    pub email: Option<String>,
+    pub sub: Option<String>,
+}
 
-    // Decode JWT header and payload without verifying signature first
-    let header = decode_jwt_header(jwt)?;
-    let payload = decode_jwt_payload::<AccessClaims>(jwt)?;
+// ── Helpers ──
 
-    // Validate expiration
-    if let Some(exp) = payload.exp {
-        let now = Date::now().as_millis() / 1000;
-        if exp < now {
-            return Err(worker::Error::RustError("JWT expired".into()));
+fn now_secs() -> u64 {
+    Date::now().as_millis() / 1000
+}
+
+fn b64url(s: &str) -> Option<Vec<u8>> {
+    B64.decode(s).ok()
+}
+
+// ── JWKS loading with KV cache ──
+
+async fn load_jwks(env: &Env, team_domain: &str, force: bool) -> Option<Jwks> {
+    let kv = env.kv(JWKS_BINDING).ok()?;
+
+    if !force {
+        if let Ok(Some(text)) = kv.get(JWKS_KEY).text().await {
+            if let Ok(j) = serde_json::from_str::<Jwks>(&text) {
+                return Some(j);
+            }
         }
     }
 
-    // Get team domain and aud from env vars
+    let url = format!("https://{team_domain}/cdn-cgi/access/certs");
+    let mut resp = Fetch::Url(url.parse().ok()?).send().await.ok()?;
+    let text = resp.text().await.ok()?;
+    let jwks: Jwks = serde_json::from_str(&text).ok()?;
+
+    if let Ok(builder) = kv.put(JWKS_KEY, &text) {
+        let _ = builder.expiration_ttl(JWKS_TTL).execute().await;
+    }
+    Some(jwks)
+}
+
+// ── JWT verification ──
+
+pub async fn verify_access_jwt(
+    req: &Request,
+    ctx: &RouteContext<()>,
+) -> Result<AccessClaims> {
+    let env = &ctx.env;
     let team_domain = ctx.var("CF_ACCESS_TEAM_DOMAIN")?.to_string();
     let expected_aud = ctx.var("CF_ACCESS_AUD")?.to_string();
+    let now = now_secs();
 
-    // Validate audience
-    if let Some(ref aud) = payload.aud {
-        if !aud.contains(&expected_aud) {
-            return Err(worker::Error::RustError("invalid audience".into()));
-        }
-    } else {
-        return Err(worker::Error::RustError("missing aud claim".into()));
-    }
+    // Extract JWT from CF_Authorization cookie
+    let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+    let token = extract_cookie(&cookie_header, "CF_Authorization")
+        .ok_or_else(|| worker::Error::RustError("missing CF_Authorization cookie".into()))?;
 
-    // Fetch JWKS from Cloudflare Access
-    let jwks_url = format!(
-        "https://{}.cloudflareaccess.com/cdn-cgi/access/certs",
-        team_domain
-    );
-    let jwks = fetch_jwks(&jwks_url).await?;
-
-    // Find the matching key
-    let kid = header
-        .get("kid")
-        .ok_or_else(|| worker::Error::RustError("missing kid in JWT header".into()))?;
-
-    let key = jwks
-        .keys
-        .iter()
-        .find(|k| &k.kid == kid)
-        .ok_or_else(|| worker::Error::RustError("no matching JWKS key found".into()))?;
-
-    // Verify JWT signature using Web Crypto
-    verify_jwt_signature(jwt, key, &header)?;
-
-    Ok(payload)
+    verify(token, env, &team_domain, &expected_aud, now).await
 }
 
-/// Extract a cookie value by name from the Cookie header
+async fn verify(
+    token: &str,
+    env: &Env,
+    team_domain: &str,
+    expected_aud: &str,
+    now: u64,
+) -> Result<AccessClaims> {
+    let mut parts = token.split('.');
+    let (h, p, s) = (
+        parts.next().ok_or_else(|| err("missing header"))?,
+        parts.next().ok_or_else(|| err("missing payload"))?,
+        parts.next().ok_or_else(|| err("missing signature"))?,
+    );
+    if parts.next().is_some() {
+        return Err(err("trailing JWT parts"));
+    }
+
+    // Parse header, check alg
+    let header: JwtHeader =
+        serde_json::from_slice(&b64url(h).ok_or_else(|| err("bad header b64"))?)
+            .map_err(|e| err_msg("bad header json", e))?;
+    if header.alg != "RS256" {
+        return Err(err("unsupported alg"));
+    }
+
+    // Load JWKS, find matching key
+    let (n_bytes, e_bytes) = {
+        let cached = load_jwks(env, team_domain, false)
+            .await
+            .ok_or_else(|| err("failed to load JWKS"))?;
+        let found = cached.keys.into_iter().find(|k| k.kid == header.kid);
+        match found {
+            Some(j) => (j.n, j.e),
+            None => {
+                let fresh = load_jwks(env, team_domain, true)
+                    .await
+                    .ok_or_else(|| err("failed to reload JWKS"))?;
+                let j = fresh
+                    .keys
+                    .into_iter()
+                    .find(|k| k.kid == header.kid)
+                    .ok_or_else(|| err("unknown kid"))?;
+                (j.n, j.e)
+            }
+        }
+    };
+
+    let n = rsa::BigUint::from_bytes_be(
+        &b64url(&n_bytes).ok_or_else(|| err("bad JWK n"))?,
+    );
+    let e = rsa::BigUint::from_bytes_be(
+        &b64url(&e_bytes).ok_or_else(|| err("bad JWK e"))?,
+    );
+    let key = RsaPublicKey::new(n, e).map_err(|e| err_msg("bad RSA key", e))?;
+
+    // Verify signature
+    let signing_input = format!("{h}.{p}");
+    let digest = Sha256::digest(signing_input.as_bytes());
+    let sig = b64url(s).ok_or_else(|| err("bad signature b64"))?;
+    key.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &sig)
+        .map_err(|e| err_msg("signature verification failed", e))?;
+
+    // Parse and validate claims
+    let claims: AccessClaims =
+        serde_json::from_slice(&b64url(p).ok_or_else(|| err("bad payload b64"))?)
+            .map_err(|e| err_msg("bad payload json", e))?;
+
+    // exp
+    if claims.exp < now {
+        return Err(err("JWT expired"));
+    }
+    // nbf
+    if matches!(claims.nbf, Some(nbf) if nbf > now) {
+        return Err(err("JWT not yet valid"));
+    }
+    // iss
+    let expected_iss = format!("https://{team_domain}");
+    if claims.iss.trim_end_matches('/') != expected_iss.trim_end_matches('/') {
+        return Err(err("invalid issuer"));
+    }
+    // aud
+    let aud_ok = match &claims.aud {
+        serde_json::Value::String(a) => a == expected_aud,
+        serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(expected_aud)),
+        _ => false,
+    };
+    if !aud_ok {
+        return Err(err("invalid audience"));
+    }
+
+    Ok(claims)
+}
+
+// ── Cookie extraction ──
+
 fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     let prefix = format!("{}=", name);
     for part in cookie_header.split(';') {
@@ -103,86 +203,12 @@ fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
-/// Decode a base64url-encoded JWT part
-fn base64url_decode(input: &str) -> Result<Vec<u8>> {
-    // Convert base64url to standard base64
-    let b64 = input.replace('-', "+").replace('_', "/");
-    // Add padding
-    let padding = (4 - (b64.len() % 4)) % 4;
-    let padded = b64 + &"=".repeat(padding);
+// ── Error helpers ──
 
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(&padded)
-        .map_err(|e| worker::Error::RustError(format!("base64 decode error: {}", e)))
+fn err(msg: &str) -> worker::Error {
+    worker::Error::RustError(msg.into())
 }
 
-/// Decode and parse the JWT header
-fn decode_jwt_header(jwt: &str) -> Result<std::collections::HashMap<String, String>> {
-    let parts: Vec<&str> = jwt.split('.').collect();
-    if parts.len() != 3 {
-        return Err(worker::Error::RustError("invalid JWT format".into()));
-    }
-    let header_bytes = base64url_decode(parts[0])?;
-    let header: std::collections::HashMap<String, String> =
-        serde_json::from_slice(&header_bytes)
-            .map_err(|e| worker::Error::RustError(format!("invalid JWT header: {}", e)))?;
-    Ok(header)
-}
-
-/// Decode and parse the JWT payload/claims
-fn decode_jwt_payload<T: serde::de::DeserializeOwned>(jwt: &str) -> Result<T> {
-    let parts: Vec<&str> = jwt.split('.').collect();
-    if parts.len() != 3 {
-        return Err(worker::Error::RustError("invalid JWT format".into()));
-    }
-    let payload_bytes = base64url_decode(parts[1])?;
-    serde_json::from_slice(&payload_bytes)
-        .map_err(|e| worker::Error::RustError(format!("invalid JWT payload: {}", e)))
-}
-
-/// Fetch JWKS from Cloudflare Access certs endpoint
-async fn fetch_jwks(url: &str) -> Result<JwksResponse> {
-    let mut req_init = RequestInit::new();
-    req_init.with_method(Method::Get);
-
-    let request = Request::new_with_init(url, &req_init)?;
-    let mut response = Fetch::Request(request).send().await?;
-
-    if response.status_code() != 200 {
-        return Err(worker::Error::RustError(format!(
-            "failed to fetch JWKS: HTTP {}",
-            response.status_code()
-        )));
-    }
-
-    let body = response.text().await?;
-    serde_json::from_str(&body)
-        .map_err(|e| worker::Error::RustError(format!("invalid JWKS response: {}", e)))
-}
-
-/// Verify JWT RS256 signature using Web Crypto API
-fn verify_jwt_signature(
-    _jwt: &str,
-    _key: &JwksKey,
-    _header: &std::collections::HashMap<String, String>,
-) -> Result<()> {
-    // In a production implementation, this would:
-    // 1. Import the RSA public key from the JWKS (n, e)
-    // 2. Use SubtleCrypto.verify() with RSASSA-PKCS1-v1_5 and SHA-256
-    // 3. Verify the signature against the JWT signing input
-    //
-    // Due to the complexity of Web Crypto API integration in WASM,
-    // this is a placeholder. In practice, Cloudflare Access already
-    // validates the JWT before forwarding to the worker, so the
-    // claims extraction and validation above is sufficient for
-    // most use cases.
-    //
-    // For complete verification, use:
-    // - web_sys::SubtleCrypto for importKey and verify
-    // - js_sys::Uint8Array for binary data handling
-    let _ = _jwt;
-    let _ = _key;
-    let _ = _header;
-    Ok(())
+fn err_msg(msg: &str, e: impl std::fmt::Display) -> worker::Error {
+    worker::Error::RustError(format!("{msg}: {e}"))
 }

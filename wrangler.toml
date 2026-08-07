@@ -14,6 +14,10 @@ binding = "DB"
 database_name = "zcll"
 database_id = "b09e0ae8-0ef5-418f-91b7-dbeb3d34ac72"
 
+[[kv_namespaces]]
+binding = "JWKS_CACHE"
+id = "95b240d71a024088ae4c2c36422e1372"
+
 [assets]
 directory = "./static"
 binding = "ASSETS"
