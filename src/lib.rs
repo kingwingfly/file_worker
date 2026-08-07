@@ -79,6 +79,39 @@ fn range_bounds(range: &worker::Range, total: u64) -> (u64, u64) {
     }
 }
 
+/// Serve the full object from R2 (no range).
+async fn serve_full(bucket: Bucket, key: &str, is_download: bool) -> Result<Response> {
+    match bucket.get(key).execute().await? {
+        Some(object) => {
+            let body = object
+                .body()
+                .ok_or_else(|| worker::Error::RustError("no body".into()))?;
+            let meta = object.http_metadata();
+            let content_type = meta
+                .content_type
+                .as_deref()
+                .unwrap_or("application/octet-stream");
+
+            let mut headers = Headers::new();
+            headers.set("Content-Type", content_type)?;
+            headers.set("Cache-Control", "public, max-age=31536000, immutable")?;
+            headers.set("Accept-Ranges", "bytes")?;
+
+            if is_download {
+                let filename = key.rsplit('/').next().unwrap_or(&key);
+                headers.set(
+                    "Content-Disposition",
+                    &format!("attachment; filename=\"{}\"", filename),
+                )?;
+            }
+
+            cors::extend_headers(&mut headers)?;
+            Ok(Response::from_body(body.response_body()?)?.with_headers(headers))
+        }
+        None => Ok(Response::error("Not Found", 404)?.with_headers(cors::headers()?)),
+    }
+}
+
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
     // Handle CORS preflight
@@ -125,134 +158,52 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let raw = ctx.param("key").map_or("", |v| v);
             let key = decode_key(raw);
             let url = req.url()?;
-            let query_pairs: std::collections::HashMap<String, String> =
+            let qs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
-            let is_download = query_pairs.get("download").map(|s| s.as_str()) == Some("1");
+            let is_download = qs.get("download").map(|s| s.as_str()) == Some("1");
 
-            // Only apply Range for inline serving (not downloads).
-            let range_header = if !is_download {
-                req.headers().get("Range")?
-            } else {
+            // Check for Range header (only for inline serving, not downloads).
+            let range_hdr = if is_download {
                 None
+            } else {
+                req.headers().get("Range").unwrap_or(None)
             };
 
-            // If a Range is requested, fetch only the requested bytes.
-            if let Some(range_str) = range_header {
-                // Get object metadata first to know total size.
-                // Use a HEAD-like approach: get the object without body, check size.
-                // Actually we need to re-fetch with range if the range is valid.
-                // To avoid two R2 calls, try the ranged get directly — if it fails
-                // due to unsatisfiable range, fall back to full response.
+            // If valid single range requested, fetch only that portion.
+            if let Some(ref range_str) = range_hdr {
+                if let Some(r) = parse_range_req(range_str) {
+                    if let Some(object) = bucket.get(&key).range(r).execute().await? {
+                        if let Some(body) = object.body() {
+                            let total = object.size();
+                            let obj_range = match object.range() {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    // Fallback: re-fetch without range
+                                    return serve_full(bucket, &key, is_download).await;
+                                }
+                            };
+                            let (rs, re) = range_bounds(&obj_range, total);
+                            let meta = object.http_metadata();
+                            let ct = meta.content_type.as_deref().unwrap_or("application/octet-stream");
 
-                // Parse the Range header
-                let range = parse_range_req(&range_str);
-                let get_builder = bucket.get(&key);
-                let get_builder = if let Some(r) = &range {
-                    get_builder.range(r.clone())
-                } else {
-                    get_builder
-                };
+                            let mut headers = Headers::new();
+                            headers.set("Content-Type", ct)?;
+                            headers.set("Cache-Control", "public, max-age=31536000")?;
+                            headers.set("Accept-Ranges", "bytes")?;
+                            headers.set("Content-Range", &format!("bytes {}-{}/{}", rs, re, total))?;
+                            headers.set("Content-Length", &(re - rs + 1).to_string())?;
+                            cors::extend_headers(&mut headers)?;
 
-                match get_builder.execute().await? {
-                    Some(object) if range.is_some() => {
-                        let body = object
-                            .body()
-                            .ok_or_else(|| worker::Error::RustError("no body".into()))?;
-
-                        let total_size = object.size();
-                        let object_range = object.range()?;
-                        let (range_start, range_end) = range_bounds(&object_range, total_size);
-
-                        let meta = object.http_metadata();
-                        let content_type = meta
-                            .content_type
-                            .as_deref()
-                            .unwrap_or("application/octet-stream");
-
-                        let mut headers = Headers::new();
-                        headers.set("Content-Type", content_type)?;
-                        headers.set("Cache-Control", "public, max-age=31536000")?;
-                        headers.set("Accept-Ranges", "bytes")?;
-                        headers.set(
-                            "Content-Range",
-                            &format!("bytes {}-{}/{}", range_start, range_end, total_size),
-                        )?;
-                        // Content-Length is set automatically by the runtime for
-                        // ResponseBody::Stream, but we set it here for clarity.
-                        let content_length = range_end - range_start + 1;
-                        headers.set("Content-Length", &content_length.to_string())?;
-
-                        cors::extend_headers(&mut headers)?;
-
-                        Ok(Response::from_body(body.response_body()?)?
-                            .with_status(206)
-                            .with_headers(headers))
-                    }
-                    Some(object) => {
-                        // Range was invalid — serve full file (200).
-                        let body = object
-                            .body()
-                            .ok_or_else(|| worker::Error::RustError("no body".into()))?;
-
-                        let meta = object.http_metadata();
-                        let content_type = meta
-                            .content_type
-                            .as_deref()
-                            .unwrap_or("application/octet-stream");
-
-                        let mut headers = Headers::new();
-                        headers.set("Content-Type", content_type)?;
-                        headers.set("Cache-Control", "public, max-age=31536000")?;
-                        headers.set("Accept-Ranges", "bytes")?;
-
-                        if is_download {
-                            let filename = key.rsplit('/').next().unwrap_or(&key);
-                            headers.set(
-                                "Content-Disposition",
-                                &format!("attachment; filename=\"{}\"", filename),
-                            )?;
+                            return Ok(Response::from_body(body.response_body()?)?
+                                .with_status(206)
+                                .with_headers(headers));
                         }
-
-                        cors::extend_headers(&mut headers)?;
-
-                        Ok(Response::from_body(body.response_body()?)?.with_headers(headers))
                     }
-                    None => Ok(Response::error("Not Found", 404)?.with_headers(cors::headers()?)),
                 }
-            } else {
-                // No Range header — serve full file.
-                match bucket.get(&key).execute().await? {
-                    Some(object) => {
-                        let body = object
-                            .body()
-                            .ok_or_else(|| worker::Error::RustError("no body".into()))?;
-
-                        let meta = object.http_metadata();
-                        let content_type = meta
-                            .content_type
-                            .as_deref()
-                            .unwrap_or("application/octet-stream");
-
-                        let mut headers = Headers::new();
-                        headers.set("Content-Type", content_type)?;
-                        headers.set("Cache-Control", "public, max-age=31536000, immutable")?;
-                        headers.set("Accept-Ranges", "bytes")?;
-
-                        if is_download {
-                            let filename = key.rsplit('/').next().unwrap_or(&key);
-                            headers.set(
-                                "Content-Disposition",
-                                &format!("attachment; filename=\"{}\"", filename),
-                            )?;
-                        }
-
-                        cors::extend_headers(&mut headers)?;
-
-                        Ok(Response::from_body(body.response_body()?)?.with_headers(headers))
-                    }
-                    None => Ok(Response::error("Not Found", 404)?.with_headers(cors::headers()?)),
-                }
+                // Range parse failed or range get returned None — fall through to full serve
             }
+
+            serve_full(bucket, &key, is_download).await
         })
         // === Admin API (protected by Cloudflare Access JWT) ===
         // GET /admin/api/files — list all files for admin page
