@@ -9,6 +9,6 @@
     "build": "worker-build --release"
   },
   "devDependencies": {
-    "wrangler": "^3"
+    "wrangler": "^4"
   }
 }
