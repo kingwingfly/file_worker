@@ -207,6 +207,10 @@ function openPreview(file) {
     vid.src = url;
     vid.controls = true;
     vid.autoplay = true;
+    vid.playsInline = true;
+    vid.preload = 'metadata';
+    vid.style.width = '100%';
+    vid.style.maxHeight = '80vh';
     dom.modalMedia.appendChild(vid);
   } else if (ct.startsWith('audio/')) {
     const wrapper = document.createElement('div');
@@ -228,6 +232,8 @@ function openPreview(file) {
     audio.src = url;
     audio.controls = true;
     audio.autoplay = true;
+    audio.preload = 'metadata';
+    audio.style.width = '100%';
     wrapper.appendChild(audio);
 
     dom.modalMedia.appendChild(wrapper);
