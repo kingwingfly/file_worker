@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🐱 File Neko — 你的可爱文件画廊</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-content">
+      <h1 class="site-title">
+        <span class="title-emoji">🐱</span>
+        File Neko
+        <span class="title-emoji">🐾</span>
+      </h1>
+      <p class="site-subtitle">你的可爱文件画廊 ✨ your cute file gallery</p>
+    </div>
+    <div class="header-paws">
+      <span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span>
+    </div>
+  </header>
+
+  <nav class="filter-bar" aria-label="Filter media types">
+    <button class="filter-btn active" data-filter="all" aria-pressed="true">
+      📂 All
+    </button>
+    <span class="filter-sep">🐾</span>
+    <button class="filter-btn" data-filter="image" aria-pressed="false">
+      🖼 Images
+    </button>
+    <span class="filter-sep">🐾</span>
+    <button class="filter-btn" data-filter="video" aria-pressed="false">
+      🎬 Videos
+    </button>
+    <span class="filter-sep">🐾</span>
+    <button class="filter-btn" data-filter="audio" aria-pressed="false">
+      🎵 Audio
+    </button>
+  </nav>
+
+  <main id="gallery" class="gallery-grid" aria-label="Media gallery">
+    <!-- Cards rendered by JavaScript -->
+  </main>
+
+  <div id="spinner" class="spinner" hidden aria-label="Loading">
+    <span class="paw">🐾</span>
+    <span class="paw">🐾</span>
+    <span class="paw">🐾</span>
+  </div>
+
+  <div id="empty-state" class="empty-state" hidden>
+    <div class="empty-cat">😴🐱</div>
+    <p class="empty-title">还没有文件哦~</p>
+    <p class="empty-subtitle">No files yet~ Upload something cute!</p>
+  </div>
+
+  <div id="error-box" class="error-box" hidden>
+    <div class="error-cat">🙀</div>
+    <p class="error-title">Oops! Something went wrong</p>
+    <p class="error-detail" id="error-detail"></p>
+    <button id="retry-btn" class="btn-retry">🔄 Retry</button>
+  </div>
+
+  <div class="load-more-wrapper" id="load-more-wrapper" hidden>
+    <button id="load-more-btn" class="btn-load-more">
+      🐾 Load More 🐾
+    </button>
+  </div>
+
+  <!-- Preview Modal -->
+  <div id="preview-modal" class="modal" role="dialog" aria-modal="true" aria-label="Media preview" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-card">
+      <button class="modal-close" aria-label="Close preview">✕</button>
+      <div id="modal-media" class="modal-media"></div>
+      <div class="modal-info">
+        <span id="modal-filename" class="modal-filename"></span>
+        <button id="modal-download" class="btn-download">💾 Download</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <div class="footer-paws">🐾 🐾 🐾</div>
+    <p>Made with 💖 and 🐱 — File Neko</p>
+  </footer>
+
+  <script defer src="app.js"></script>
+</body>
+</html>

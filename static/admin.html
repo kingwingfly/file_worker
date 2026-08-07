@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🐱 File Neko — Admin</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .admin-container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 1.5rem;
+    }
+
+    .admin-section {
+      background: var(--white);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: var(--shadow);
+    }
+
+    .admin-section h2 {
+      font-size: 1.2rem;
+      margin-bottom: 1rem;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .upload-zone {
+      border: 3px dashed var(--soft-blue);
+      border-radius: var(--radius);
+      padding: 2rem;
+      text-align: center;
+      transition: var(--transition);
+      cursor: pointer;
+      position: relative;
+    }
+
+    .upload-zone:hover,
+    .upload-zone.drag-over {
+      border-color: var(--pink);
+      background: var(--light-pink);
+    }
+
+    .upload-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    .upload-zone-icon { font-size: 3rem; margin-bottom: 0.5rem; }
+    .upload-zone-text { font-weight: 500; }
+    .upload-zone-hint { color: var(--text-light); font-size: 0.85rem; margin-top: 0.25rem; }
+
+    .form-group {
+      margin-top: 1rem;
+    }
+
+    .form-group label {
+      display: block;
+      font-weight: 500;
+      margin-bottom: 0.25rem;
+      font-size: 0.9rem;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      border: 2px solid var(--soft-blue);
+      border-radius: var(--radius-sm);
+      font-size: 0.95rem;
+      transition: var(--transition);
+    }
+
+    .form-group input:focus {
+      border-color: var(--pink);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(255, 182, 193, 0.2);
+    }
+
+    .form-hint { color: var(--text-light); font-size: 0.8rem; margin-top: 0.2rem; }
+
+    .btn-upload {
+      display: block;
+      width: 100%;
+      margin-top: 1rem;
+      background: var(--pink);
+      color: var(--white);
+      border: none;
+      padding: 0.75rem;
+      border-radius: 999px;
+      font-size: 1.05rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .btn-upload:hover { background: #FF9AAF; transform: scale(1.02); }
+    .btn-upload:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .upload-progress {
+      margin-top: 1rem;
+      height: 6px;
+      background: var(--soft-blue);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .upload-progress-bar {
+      height: 100%;
+      background: var(--pink);
+      transition: width 0.3s;
+    }
+
+    .upload-result {
+      margin-top: 0.75rem;
+      padding: 0.75rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.9rem;
+    }
+
+    .upload-result.success {
+      background: #D5F5E3;
+      color: #1E8449;
+    }
+
+    .upload-result.error {
+      background: #FADBD8;
+      color: #C0392B;
+    }
+
+    .file-list {
+      list-style: none;
+    }
+
+    .file-list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid #f0f0f0;
+      gap: 0.75rem;
+    }
+
+    .file-list-item:last-child { border-bottom: none; }
+
+    .file-list-name {
+      flex: 1;
+      font-size: 0.9rem;
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-list-size { font-size: 0.8rem; color: var(--text-light); white-space: nowrap; }
+
+    .btn-delete {
+      background: none;
+      border: 1px solid #e0e0e0;
+      color: var(--text-light);
+      padding: 0.25rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: var(--transition);
+      white-space: nowrap;
+    }
+
+    .btn-delete:hover { background: #FADBD8; color: #C0392B; border-color: #F5B7B1; }
+
+    .admin-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+    }
+
+    .admin-header .back-link {
+      color: var(--pink);
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+
+    .admin-header .back-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-content">
+      <h1 class="site-title">
+        <span class="title-emoji">🐱</span>
+        File Neko Admin
+      </h1>
+      <p class="site-subtitle">上传 & 管理你的文件 ✨ Upload & Manage</p>
+    </div>
+  </header>
+
+  <div class="admin-container">
+    <div class="admin-header">
+      <h2>🔐 管理员面板</h2>
+      <a href="/" class="back-link">← 返回画廊 Back to Gallery</a>
+    </div>
+
+    <!-- Upload Section -->
+    <div class="admin-section">
+      <h2>📤 上传文件 Upload</h2>
+
+      <div class="upload-zone" id="upload-zone">
+        <div class="upload-zone-icon">🐾</div>
+        <div class="upload-zone-text">点击或拖拽文件到此处</div>
+        <div class="upload-zone-hint">Click or drag & drop files here</div>
+        <div class="upload-zone-hint">支持 Support: JPG, PNG, GIF, MP4, WEBM, MP3, WAV, etc.</div>
+        <input type="file" id="file-input" accept="image/*,video/*,audio/*">
+      </div>
+
+      <div class="form-group">
+        <label for="custom-path">📁 自定义路径 Custom Path (optional)</label>
+        <input type="text" id="custom-path" placeholder="e.g. photos/vacation/ 或 my-file.jpg">
+        <div class="form-hint">留空则自动生成路径。If blank, path is auto-generated.</div>
+      </div>
+
+      <button class="btn-upload" id="upload-btn" disabled>
+        🚀 上传 Upload
+      </button>
+
+      <div class="upload-progress" hidden id="progress-wrapper">
+        <div class="upload-progress-bar" id="progress-bar" style="width:0%"></div>
+      </div>
+
+      <div class="upload-result" hidden id="upload-result"></div>
+    </div>
+
+    <!-- Files List Section -->
+    <div class="admin-section">
+      <h2>📋 文件列表 Files</h2>
+      <ul class="file-list" id="admin-file-list">
+        <li class="file-list-item" style="justify-content:center; color: var(--text-light);">
+          加载中... Loading...
+        </li>
+      </ul>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <div class="footer-paws">🐾 🐾 🐾</div>
+    <p>Made with 💖 and 🐱 — File Neko Admin</p>
+  </footer>
+
+  <script>
+    'use strict';
+
+    const fileInput = document.getElementById('file-input');
+    const uploadZone = document.getElementById('upload-zone');
+    const uploadBtn = document.getElementById('upload-btn');
+    const progressWrapper = document.getElementById('progress-wrapper');
+    const progressBar = document.getElementById('progress-bar');
+    const uploadResult = document.getElementById('upload-result');
+    const customPath = document.getElementById('custom-path');
+    const fileList = document.getElementById('admin-file-list');
+    let selectedFile = null;
+
+    // File selection
+    fileInput.addEventListener('change', () => {
+      selectedFile = fileInput.files[0];
+      uploadBtn.disabled = !selectedFile;
+      if (selectedFile) {
+        document.querySelector('.upload-zone-text').textContent = selectedFile.name;
+        document.querySelector('.upload-zone-hint').textContent =
+          formatSize(selectedFile.size) + ' — ' + (selectedFile.type || 'unknown');
+      }
+    });
+
+    // Drag & drop
+    uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+    uploadZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        selectedFile = file;
+        fileInput.files = e.dataTransfer.files;
+        uploadBtn.disabled = false;
+        document.querySelector('.upload-zone-text').textContent = file.name;
+        document.querySelector('.upload-zone-hint').textContent =
+          formatSize(file.size) + ' — ' + (file.type || 'unknown');
+      }
+    });
+
+    // Upload
+    uploadBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = '⏳ 上传中 Uploading...';
+      progressWrapper.hidden = false;
+      progressBar.style.width = '0%';
+      uploadResult.hidden = true;
+
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      if (customPath.value.trim()) {
+        formData.append('path', customPath.value.trim());
+      }
+
+      try {
+        // Simulate progress since fetch doesn't provide upload progress natively
+        const progressInterval = setInterval(() => {
+          const current = parseFloat(progressBar.style.width) || 0;
+          if (current < 90) progressBar.style.width = (current + Math.random() * 10) + '%';
+        }, 200);
+
+        const resp = await fetch('/admin/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        clearInterval(progressInterval);
+        progressBar.style.width = '100%';
+
+        if (resp.ok) {
+          const data = await resp.json();
+          showResult(true, `✅ 上传成功! Uploaded: ${data.key} (${formatSize(data.size)})`);
+          customPath.value = '';
+          selectedFile = null;
+          fileInput.value = '';
+          document.querySelector('.upload-zone-text').textContent = '点击或拖拽文件到此处';
+          document.querySelector('.upload-zone-hint').textContent = 'Click or drag & drop files here';
+          loadFiles();
+        } else {
+          const text = await resp.text();
+          showResult(false, `❌ 上传失败 Upload failed: ${resp.status} ${text}`);
+        }
+      } catch (err) {
+        showResult(false, `❌ 网络错误 Network error: ${err.message}`);
+      } finally {
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = '🚀 上传 Upload';
+        setTimeout(() => { progressWrapper.hidden = true; }, 1000);
+      }
+    });
+
+    function showResult(success, msg) {
+      uploadResult.hidden = false;
+      uploadResult.className = 'upload-result ' + (success ? 'success' : 'error');
+      uploadResult.textContent = msg;
+    }
+
+    // Load files
+    async function loadFiles() {
+      try {
+        const resp = await fetch('/admin/api/files');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        renderFileList(data.files || []);
+      } catch (err) {
+        fileList.innerHTML = `<li class="file-list-item" style="justify-content:center; color: #C0392B;">
+          ❌ 加载失败 Failed to load: ${err.message}
+        </li>`;
+      }
+    }
+
+    function renderFileList(files) {
+      if (files.length === 0) {
+        fileList.innerHTML = `<li class="file-list-item" style="justify-content:center; color: var(--text-light);">
+          😴 还没有文件 No files yet~
+        </li>`;
+        return;
+      }
+
+      fileList.innerHTML = files.map(f => `
+        <li class="file-list-item">
+          <span class="file-list-name" title="${escapeHtml(f.key)}">📄 ${escapeHtml(f.key)}</span>
+          <span class="file-list-size">${formatSize(f.size)}</span>
+          <button class="btn-delete" onclick="deleteFile('${escapeAttr(f.key)}')">🗑 Delete</button>
+        </li>
+      `).join('');
+    }
+
+    async function deleteFile(key) {
+      if (!confirm(`确认删除 Delete "${key}"?`)) return;
+      try {
+        const resp = await fetch(`/admin/api/files/${encodeURIComponent(key)}`, { method: 'DELETE' });
+        if (resp.ok) {
+          loadFiles();
+        } else {
+          alert('删除失败 Delete failed: ' + resp.status);
+        }
+      } catch (err) {
+        alert('网络错误 Network error: ' + err.message);
+      }
+    }
+
+    function formatSize(bytes) {
+      if (!bytes || bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return (bytes / Math.pow(k, i)).toFixed(i > 0 ? 1 : 0) + ' ' + sizes[i];
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function escapeAttr(str) {
+      return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    }
+
+    // Initial load
+    loadFiles();
+  </script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+name = "file-worker"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-08-01"
+
+[build]
+command = "cargo install worker-build && worker-build --release"
+
+[[r2_buckets]]
+binding = "FILE_BUCKET"
+bucket_name = "file-bucket"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "file-metadata"
+database_id = "file-metadata-db"
+
+[assets]
+directory = "./static"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/admin/api/*"]
+
+[vars]
+# Cloudflare Access configuration — set these before deploy
+CF_ACCESS_TEAM_DOMAIN = "your-team"
+CF_ACCESS_AUD = "your-application-aud-tag"
