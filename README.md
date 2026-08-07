@@ -42,7 +42,12 @@ Worker (Rust/worker-rs)
 ```bash
 git clone <repo-url>
 cd file_worker
-npm install -g wrangler
+
+# Install Node.js dependencies (wrangler)
+npm install
+
+# Install worker-build (one-time setup)
+cargo install worker-build
 ```
 
 ### 2. Configure Cloudflare Resources
@@ -80,7 +85,7 @@ CF_ACCESS_AUD = "your-application-audience-tag"
 ### 3. Run locally
 
 ```bash
-wrangler dev
+npx wrangler dev
 ```
 
 Open http://localhost:8787 in your browser.
@@ -88,7 +93,7 @@ Open http://localhost:8787 in your browser.
 ### 4. Deploy
 
 ```bash
-wrangler deploy
+npx wrangler deploy
 ```
 
 ## 📡 API Endpoints

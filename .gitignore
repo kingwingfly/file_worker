@@ -1,1 +1,28 @@
+# Rust
 /target
+Cargo.lock
+
+# Node.js
+node_modules/
+
+# Wrangler
+.wrangler/
+.dev.vars
+
+# Build output (worker-build)
+/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local

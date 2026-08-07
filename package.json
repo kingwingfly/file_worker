@@ -1,0 +1,14 @@
+{
+  "name": "file-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "🐱 File Neko — cat-themed media file browser on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "worker-build --release"
+  },
+  "devDependencies": {
+    "wrangler": "^3"
+  }
+}
