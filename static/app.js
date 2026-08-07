@@ -131,14 +131,9 @@ function createCard(file, index) {
     img.onclick = () => openPreview(file);
     thumb.appendChild(img);
   } else if (ct.startsWith('video/')) {
-    const vid = document.createElement('video');
-    vid.className = 'card-thumb';
-    vid.src = `/api/file/${encodePath(file.key)}`;
-    vid.muted = true;
-    vid.preload = 'metadata';
-    vid.onerror = () => { vid.outerHTML = placeholderHTML('🎬'); };
-    vid.onclick = () => openPreview(file);
-    thumb.appendChild(vid);
+    thumb.className = 'card-thumb placeholder';
+    thumb.textContent = '🎬';
+    thumb.onclick = () => openPreview(file);
   } else if (ct.startsWith('audio/')) {
     thumb.className = 'card-thumb placeholder';
     thumb.textContent = '🎵';

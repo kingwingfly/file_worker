@@ -12,73 +12,6 @@ fn decode_key(encoded: &str) -> String {
     percent_decode_str(encoded).decode_utf8_lossy().into_owned()
 }
 
-/// Parse an HTTP `Range: bytes=...` header into a worker::Range.
-/// Returns `None` for multi-range requests or invalid syntax.
-fn parse_range_req(header: &str) -> Option<worker::Range> {
-    let header = header.strip_prefix("bytes=")?;
-    // We handle only single-range requests.
-    if header.contains(',') {
-        return None;
-    }
-
-    if let Some(suffix) = header.strip_prefix('-') {
-        // bytes=-N → last N bytes
-        let len: u64 = suffix.trim().parse().ok()?;
-        if len == 0 {
-            return None;
-        }
-        return Some(worker::Range::Suffix { suffix: len });
-    }
-
-    if let Some(rest) = header.strip_suffix('-') {
-        // bytes=M- → from M to end
-        let offset: u64 = rest.trim().parse().ok()?;
-        return Some(worker::Range::OffsetToEnd { offset });
-    }
-
-    // bytes=M-N → from M to N (inclusive)
-    let parts: Vec<&str> = header.splitn(2, '-').collect();
-    if parts.len() == 2 {
-        let start: u64 = parts[0].trim().parse().ok()?;
-        let end: u64 = parts[1].trim().parse().ok()?;
-        if start > end {
-            return None;
-        }
-        let length = end - start + 1;
-        return Some(worker::Range::OffsetWithLength { offset: start, length });
-    }
-
-    None
-}
-
-/// Convert a worker::Range to (start, end) inclusive bounds for Content-Range.
-fn range_bounds(range: &worker::Range, total: u64) -> (u64, u64) {
-    if total == 0 {
-        return (0, 0);
-    }
-    match range {
-        worker::Range::OffsetWithLength { offset, length } => {
-            let start = *offset;
-            let end = std::cmp::min(start + length - 1, total - 1);
-            (start, end)
-        }
-        worker::Range::OffsetToEnd { offset } => {
-            let start = *offset;
-            let end = total - 1;
-            (start, end)
-        }
-        worker::Range::Prefix { length } => {
-            let end = std::cmp::min(length - 1, total - 1);
-            (0, end)
-        }
-        worker::Range::Suffix { suffix } => {
-            let start = if *suffix >= total { 0 } else { total - suffix };
-            let end = total - 1;
-            (start, end)
-        }
-    }
-}
-
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
     // Handle CORS preflight
@@ -129,38 +62,6 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 url.query_pairs().into_owned().collect();
             let is_download = query_pairs.get("download").map(|s| s.as_str()) == Some("1");
 
-            // --- Range request handling (video/audio seeking) ---
-            // Intercept only for inline serving; downloads always get the full file.
-            if !is_download {
-                if let Ok(Some(range_str)) = req.headers().get("Range") {
-                    if let Some(r) = parse_range_req(&range_str) {
-                        if let Ok(Some(object)) = bucket.get(&key).range(r).execute().await {
-                            if let Some(body) = object.body() {
-                                if let Ok(obj_range) = object.range() {
-                                    let total = object.size();
-                                    let (rs, re) = range_bounds(&obj_range, total);
-                                    let meta = object.http_metadata();
-                                    let ct = meta.content_type.as_deref().unwrap_or("application/octet-stream");
-
-                                    let mut headers = Headers::new();
-                                    headers.set("Content-Type", ct)?;
-                                    headers.set("Cache-Control", "public, max-age=31536000")?;
-                                    headers.set("Accept-Ranges", "bytes")?;
-                                    headers.set("Content-Range", &format!("bytes {}-{}/{}", rs, re, total))?;
-                                    headers.set("Content-Length", &(re - rs + 1).to_string())?;
-                                    cors::extend_headers(&mut headers)?;
-
-                                    return Ok(Response::from_body(body.response_body()?)?
-                                        .with_status(206)
-                                        .with_headers(headers));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // --- Original full-file serving (unchanged) ---
             match bucket.get(&key).execute().await? {
                 Some(object) => {
                     let body = object
