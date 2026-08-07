@@ -113,7 +113,16 @@
     .upload-progress-bar {
       height: 100%;
       background: var(--pink);
-      transition: width 0.3s;
+      border-radius: 3px;
+      transition: width 0.15s;
+      width: 0%;
+    }
+
+    .upload-progress-text {
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--text-light);
+      margin-top: 0.35rem;
     }
 
     .upload-result {
@@ -230,6 +239,7 @@
 
       <div class="upload-progress" hidden id="progress-wrapper">
         <div class="upload-progress-bar" id="progress-bar" style="width:0%"></div>
+        <div class="upload-progress-text" id="progress-text"></div>
       </div>
 
       <div class="upload-result" hidden id="upload-result"></div>
@@ -292,14 +302,15 @@
       }
     });
 
-    // Upload
-    uploadBtn.addEventListener('click', async () => {
+    // Upload — uses XHR for real progress tracking
+    uploadBtn.addEventListener('click', () => {
       if (!selectedFile) return;
 
       uploadBtn.disabled = true;
       uploadBtn.textContent = '⏳ 上传中...';
       progressWrapper.hidden = false;
       progressBar.style.width = '0%';
+      document.getElementById('progress-text').textContent = '';
       uploadResult.hidden = true;
 
       const formData = new FormData();
@@ -308,22 +319,24 @@
         formData.append('path', customPath.value.trim());
       }
 
-      try {
-        const progressInterval = setInterval(() => {
-          const current = parseFloat(progressBar.style.width) || 0;
-          if (current < 90) progressBar.style.width = (current + Math.random() * 10) + '%';
-        }, 200);
+      const xhr = new XMLHttpRequest();
 
-        const resp = await fetch('/admin/api/upload', {
-          method: 'POST',
-          body: formData,
-        });
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          progressBar.style.width = pct + '%';
+          document.getElementById('progress-text').textContent =
+            `${formatSize(e.loaded)} / ${formatSize(e.total)}`;
+        }
+      });
 
-        clearInterval(progressInterval);
+      xhr.addEventListener('load', () => {
         progressBar.style.width = '100%';
+        document.getElementById('progress-text').textContent =
+          `${formatSize(selectedFile.size)} / ${formatSize(selectedFile.size)}`;
 
-        if (resp.ok) {
-          const data = await resp.json();
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const data = JSON.parse(xhr.responseText);
           showResult(true, `✅ 上传成功! ${data.key} (${formatSize(data.size)})`);
           customPath.value = '';
           selectedFile = null;
@@ -332,16 +345,22 @@
           document.querySelector('.upload-zone-hint').textContent = '支持图片、视频、音频';
           loadClips();
         } else {
-          const text = await resp.text();
-          showResult(false, `❌ 上传失败: ${resp.status} ${text}`);
+          showResult(false, `❌ 上传失败: ${xhr.status} ${xhr.responseText}`);
         }
-      } catch (err) {
-        showResult(false, `❌ 网络错误: ${err.message}`);
-      } finally {
+      });
+
+      xhr.addEventListener('error', () => {
+        showResult(false, '❌ 网络错误');
+      });
+
+      xhr.addEventListener('loadend', () => {
         uploadBtn.disabled = true;
         uploadBtn.textContent = '🚀 上传';
-        setTimeout(() => { progressWrapper.hidden = true; }, 1000);
-      }
+        setTimeout(() => { progressWrapper.hidden = true; }, 1500);
+      });
+
+      xhr.open('POST', '/admin/api/upload');
+      xhr.send(formData);
     });
 
     function showResult(success, msg) {
