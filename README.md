@@ -65,10 +65,16 @@ bucket_name = "your-bucket-name"
 Create a D1 database and update the `database_id` in `wrangler.toml`:
 
 ```bash
-wrangler d1 create file-metadata
+npx wrangler d1 create file-metadata
 ```
 
-Then update `wrangler.toml` with the returned database ID.
+Then update `wrangler.toml` with the returned database ID, and apply migrations:
+
+```bash
+npx wrangler d1 migrations apply file-metadata
+```
+
+Migrations are in the `migrations/` directory.
 
 #### Cloudflare Access (for admin page)
 1. In Cloudflare Zero Trust dashboard, create an Application
@@ -85,6 +91,10 @@ CF_ACCESS_AUD = "your-application-audience-tag"
 ### 3. Run locally
 
 ```bash
+# Apply D1 migrations (first time)
+npx wrangler d1 migrations apply zcll --local
+
+# Start dev server
 npx wrangler dev
 ```
 
@@ -93,6 +103,10 @@ Open http://localhost:8787 in your browser.
 ### 4. Deploy
 
 ```bash
+# Apply D1 migrations to production
+npx wrangler d1 migrations apply zcll
+
+# Deploy the worker
 npx wrangler deploy
 ```
 

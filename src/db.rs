@@ -9,21 +9,6 @@ pub struct FileRecord {
     pub uploaded_at: String,
 }
 
-/// Initialize the D1 table if it doesn't exist
-#[allow(dead_code)]
-pub async fn init_db(ctx: &worker::RouteContext<()>) -> Result<()> {
-    let db = ctx.d1("DB")?;
-    db.exec("CREATE TABLE IF NOT EXISTS files (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        key TEXT NOT NULL UNIQUE,
-        size INTEGER NOT NULL,
-        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
-        uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )")
-    .await?;
-    Ok(())
-}
-
 /// List files from D1 with optional filter and pagination
 pub async fn list_files(
     ctx: &worker::RouteContext<()>,
