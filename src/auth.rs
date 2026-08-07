@@ -1,12 +1,11 @@
 use base64::Engine;
-use rsa::{pkcs1v15::Pkcs1v15Sign, BoxedUint, RsaPublicKey};
+use rsa::{BoxedUint, RsaPublicKey, pkcs1v15::Pkcs1v15Sign};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use worker::*;
 
 // ── base64url engine (no padding) ──
-const B64: base64::engine::GeneralPurpose =
-    base64::engine::general_purpose::URL_SAFE_NO_PAD;
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 // ── KV cache config ──
 const JWKS_BINDING: &str = "JWKS_CACHE";
@@ -59,12 +58,11 @@ fn b64url(s: &str) -> Option<Vec<u8>> {
 async fn load_jwks(env: &Env, team_domain: &str, force: bool) -> Option<Jwks> {
     let kv = env.kv(JWKS_BINDING).ok()?;
 
-    if !force {
-        if let Ok(Some(text)) = kv.get(JWKS_KEY).text().await {
-            if let Ok(j) = serde_json::from_str::<Jwks>(&text) {
-                return Some(j);
-            }
-        }
+    if !force
+        && let Ok(Some(text)) = kv.get(JWKS_KEY).text().await
+        && let Ok(j) = serde_json::from_str::<Jwks>(&text)
+    {
+        return Some(j);
     }
 
     let url = format!("https://{team_domain}/cdn-cgi/access/certs");
@@ -80,10 +78,7 @@ async fn load_jwks(env: &Env, team_domain: &str, force: bool) -> Option<Jwks> {
 
 // ── JWT verification ──
 
-pub async fn verify_access_jwt(
-    req: &Request,
-    ctx: &RouteContext<()>,
-) -> Result<AccessClaims> {
+pub async fn verify_access_jwt(req: &Request, ctx: &RouteContext<()>) -> Result<AccessClaims> {
     let env = &ctx.env;
     let team_domain = ctx.var("CF_ACCESS_TEAM_DOMAIN")?.to_string();
     let expected_aud = ctx.var("CF_ACCESS_AUD")?.to_string();
@@ -144,12 +139,8 @@ async fn verify(
         }
     };
 
-    let n = BoxedUint::from_be_slice_vartime(
-        &b64url(&n_bytes).ok_or_else(|| err("bad JWK n"))?,
-    );
-    let e = BoxedUint::from_be_slice_vartime(
-        &b64url(&e_bytes).ok_or_else(|| err("bad JWK e"))?,
-    );
+    let n = BoxedUint::from_be_slice_vartime(&b64url(&n_bytes).ok_or_else(|| err("bad JWK n"))?);
+    let e = BoxedUint::from_be_slice_vartime(&b64url(&e_bytes).ok_or_else(|| err("bad JWK e"))?);
     let key = RsaPublicKey::new(n, e).map_err(|e| err_msg("bad RSA key", e))?;
 
     // Verify signature
