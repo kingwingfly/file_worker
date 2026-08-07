@@ -128,7 +128,7 @@ function createCard(file, index) {
   if (ct.startsWith('image/')) {
     const img = document.createElement('img');
     img.className = 'card-thumb';
-    img.src = `/api/file/${encodeURIComponent(file.key)}`;
+    img.src = `/api/file/${encodePath(file.key)}`;
     img.alt = file.key;
     img.loading = 'lazy';
     img.onerror = () => { img.outerHTML = placeholderHTML('🖼️'); };
@@ -137,7 +137,7 @@ function createCard(file, index) {
   } else if (ct.startsWith('video/')) {
     const vid = document.createElement('video');
     vid.className = 'card-thumb';
-    vid.src = `/api/file/${encodeURIComponent(file.key)}`;
+    vid.src = `/api/file/${encodePath(file.key)}`;
     vid.muted = true;
     vid.preload = 'metadata';
     vid.onerror = () => { vid.outerHTML = placeholderHTML('🎬'); };
@@ -206,7 +206,7 @@ function openPreview(file) {
   dom.modalMedia.innerHTML = '';
 
   const ct = file.content_type || '';
-  const url = `/api/file/${encodeURIComponent(file.key)}`;
+  const url = `/api/file/${encodePath(file.key)}`;
 
   if (ct.startsWith('image/')) {
     const img = document.createElement('img');
@@ -258,7 +258,7 @@ function closePreview() {
 
 // ── Download ──
 function downloadFile(file) {
-  const url = `/api/file/${encodeURIComponent(file.key)}?download=1`;
+  const url = `/api/file/${encodePath(file.key)}?download=1`;
   const a = document.createElement('a');
   a.href = url;
   a.download = file.key.split('/').pop() || file.key;
@@ -322,6 +322,12 @@ function updateEmptyState() {
 }
 
 // ── Utilities ──
+function encodePath(key) {
+  // Encode each path segment individually so slashes stay literal,
+  // allowing the router's wildcard to capture the full multi-segment key.
+  return key.split('/').map(encodeURIComponent).join('/');
+}
+
 function formatFileSize(bytes) {
   if (bytes == null || bytes === 0) return '0 B';
   const k = 1024;

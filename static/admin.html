@@ -386,7 +386,7 @@
     async function deleteFile(key) {
       if (!confirm(`确认删除 Delete "${key}"?`)) return;
       try {
-        const resp = await fetch(`/admin/api/files/${encodeURIComponent(key)}`, { method: 'DELETE' });
+        const resp = await fetch(`/admin/api/files/${encodePath(key)}`, { method: 'DELETE' });
         if (resp.ok) {
           loadFiles();
         } else {
@@ -395,6 +395,10 @@
       } catch (err) {
         alert('网络错误 Network error: ' + err.message);
       }
+    }
+
+    function encodePath(key) {
+      return key.split('/').map(encodeURIComponent).join('/');
     }
 
     function formatSize(bytes) {

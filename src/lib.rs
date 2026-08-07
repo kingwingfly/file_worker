@@ -1,8 +1,16 @@
+use percent_encoding::percent_decode_str;
 use worker::*;
 
 mod auth;
 mod cors;
 mod db;
+
+/// URL-decode a percent-encoded key from the URL path.
+/// The URL parser preserves `%2F` (encoded `/`) in pathnames, so keys
+/// containing slashes arrive still-encoded and must be decoded for R2/D1.
+fn decode_key(encoded: &str) -> String {
+    percent_decode_str(encoded).decode_utf8_lossy().into_owned()
+}
 
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
@@ -47,13 +55,15 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         // GET /api/file/*key — serve file from R2 (wildcard matches keys with /)
         .get_async("/api/file/*key", |req, ctx| async move {
             let bucket = ctx.bucket("FILE_BUCKET")?;
-            let key = ctx.param("key").map_or("", |v| v);
+            let raw = ctx.param("key").map_or("", |v| v);
+            let key = decode_key(raw);
+            console_log!("Serving file: raw_param={}, decoded_key={}", raw, key);
             let url = req.url()?;
             let query_pairs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
             let is_download = query_pairs.get("download").map(|s| s.as_str()) == Some("1");
 
-            match bucket.get(key).execute().await? {
+            match bucket.get(&key).execute().await? {
                 Some(object) => {
                     let body = object
                         .body()
@@ -70,7 +80,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                     headers.set("Cache-Control", "public, max-age=31536000, immutable")?;
 
                     if is_download {
-                        let filename = key.rsplit('/').next().unwrap_or(key);
+                        let filename = key.rsplit('/').next().unwrap_or(&key);
                         headers.set(
                             "Content-Disposition",
                             &format!("attachment; filename=\"{}\"", filename),
@@ -164,21 +174,23 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let claims = auth::verify_access_jwt(&req, &ctx).await?;
             console_log!("Delete by: {:?}", claims.email);
 
-            let key = ctx.param("key").map_or("", |v| v);
+            let raw = ctx.param("key").map_or("", |v| v);
+            let key = decode_key(raw);
+            console_log!("Deleting file: raw_param={}, decoded_key={}", raw, key);
 
             if key.is_empty() {
                 return Ok(Response::error("Bad Request: missing key", 400)?
                     .with_headers(cors::headers()?));
             }
 
-            // Delete from R2
+            // Delete from D1 first (by ref), then R2 (by value)
+            let deleted_key = key.clone();
+            db::delete_file(&ctx, &key).await?;
+
             let bucket = ctx.bucket("FILE_BUCKET")?;
             bucket.delete(key).await?;
 
-            // Delete from D1
-            db::delete_file(&ctx, key).await?;
-
-            Ok(Response::from_json(&serde_json::json!({"ok": true, "deleted": key}))?
+            Ok(Response::from_json(&serde_json::json!({"ok": true, "deleted": deleted_key}))?
                 .with_headers(cors::headers()?))
         })
         // Fallback: serve static assets via Fetcher
