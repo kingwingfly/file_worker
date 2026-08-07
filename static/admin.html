@@ -302,66 +302,143 @@
       }
     });
 
-    // Upload — uses XHR for real progress tracking
+    // Upload — multipart for large files
+    const CHUNK_SIZE = 25 * 1024 * 1024; // 25 MB per chunk
+
     uploadBtn.addEventListener('click', () => {
       if (!selectedFile) return;
+      doMultipartUpload(selectedFile, customPath.value.trim());
+    });
 
+    async function doMultipartUpload(file, path) {
       uploadBtn.disabled = true;
-      uploadBtn.textContent = '⏳ 上传中...';
+      uploadBtn.textContent = '⏳ 准备上传...';
       progressWrapper.hidden = false;
       progressBar.style.width = '0%';
       document.getElementById('progress-text').textContent = '';
       uploadResult.hidden = true;
 
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-      if (customPath.value.trim()) {
-        formData.append('path', customPath.value.trim());
-      }
+      let uploadId = null;
+      let key = null;
 
-      const xhr = new XMLHttpRequest();
-
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          const pct = Math.round((e.loaded / e.total) * 100);
-          progressBar.style.width = pct + '%';
-          document.getElementById('progress-text').textContent =
-            `${formatSize(e.loaded)} / ${formatSize(e.total)}`;
+      try {
+        // 1. Start multipart upload
+        uploadBtn.textContent = '⏳ 创建上传...';
+        const startResp = await fetch('/admin/api/upload/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            content_type: file.type || 'application/octet-stream',
+            path: path || undefined,
+          }),
+        });
+        if (!startResp.ok) {
+          throw new Error(`Start failed: ${startResp.status}`);
         }
-      });
+        const startData = await startResp.json();
+        uploadId = startData.upload_id;
+        key = startData.key;
 
-      xhr.addEventListener('load', () => {
+        // 2. Upload chunks
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const parts = [];
+        let uploadedBytes = 0;
+
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
+
+          uploadBtn.textContent = `⏳ 上传中 ${i + 1}/${totalChunks}...`;
+
+          const part = await uploadChunk(uploadId, key, i + 1, chunk, (chunkLoaded) => {
+            const total = uploadedBytes + chunkLoaded;
+            const pct = Math.round((total / file.size) * 100);
+            progressBar.style.width = pct + '%';
+            document.getElementById('progress-text').textContent =
+              `${formatSize(total)} / ${formatSize(file.size)}`;
+          });
+
+          parts.push(part);
+          uploadedBytes += chunk.size;
+        }
+
+        // 3. Complete
+        uploadBtn.textContent = '⏳ 完成中...';
         progressBar.style.width = '100%';
-        document.getElementById('progress-text').textContent =
-          `${formatSize(selectedFile.size)} / ${formatSize(selectedFile.size)}`;
-
-        if (xhr.status >= 200 && xhr.status < 300) {
-          const data = JSON.parse(xhr.responseText);
-          showResult(true, `✅ 上传成功! ${data.key} (${formatSize(data.size)})`);
-          customPath.value = '';
-          selectedFile = null;
-          fileInput.value = '';
-          document.querySelector('.upload-zone-text').textContent = '点击或拖拽到此处';
-          document.querySelector('.upload-zone-hint').textContent = '支持图片、视频、音频';
-          loadClips();
-        } else {
-          showResult(false, `❌ 上传失败: ${xhr.status} ${xhr.responseText}`);
+        const completeResp = await fetch(
+          `/admin/api/upload/complete?upload_id=${encodeURIComponent(uploadId)}&key=${encodePath(key)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              parts: parts.map(p => ({ n: p.part_number, etag: p.etag })),
+              content_type: file.type || 'application/octet-stream',
+            }),
+          }
+        );
+        if (!completeResp.ok) {
+          throw new Error(`Complete failed: ${completeResp.status}`);
         }
-      });
+        const completeData = await completeResp.json();
 
-      xhr.addEventListener('error', () => {
-        showResult(false, '❌ 网络错误');
-      });
+        showResult(true, `✅ 上传成功! ${completeData.key} (${formatSize(completeData.size)})`);
+        customPath.value = '';
+        selectedFile = null;
+        fileInput.value = '';
+        document.querySelector('.upload-zone-text').textContent = '点击或拖拽到此处';
+        document.querySelector('.upload-zone-hint').textContent = '支持图片、视频、音频';
+        loadClips();
 
-      xhr.addEventListener('loadend', () => {
+      } catch (err) {
+        console.error('Upload error:', err);
+        showResult(false, `❌ 上传失败: ${err.message}`);
+        // Abort multipart upload on error
+        if (uploadId && key) {
+          try {
+            await fetch(
+              `/admin/api/upload?upload_id=${encodeURIComponent(uploadId)}&key=${encodePath(key)}`,
+              { method: 'DELETE' }
+            );
+          } catch (_) { /* ignore abort errors */ }
+        }
+      } finally {
         uploadBtn.disabled = true;
         uploadBtn.textContent = '🚀 上传';
         setTimeout(() => { progressWrapper.hidden = true; }, 1500);
-      });
+      }
+    }
 
-      xhr.open('POST', '/admin/api/upload');
-      xhr.send(formData);
-    });
+    function uploadChunk(uploadId, key, partNumber, blob, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable && onProgress) {
+            onProgress(e.loaded);
+          }
+        });
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(JSON.parse(xhr.responseText));
+          } else {
+            reject(new Error(`Part ${partNumber}: HTTP ${xhr.status}`));
+          }
+        });
+
+        xhr.addEventListener('error', () => reject(new Error(`Part ${partNumber}: network error`)));
+
+        const params = new URLSearchParams({
+          upload_id: uploadId,
+          key: key,
+          n: partNumber,
+        });
+        xhr.open('PUT', `/admin/api/upload/part?${params}`);
+        xhr.send(blob);
+      });
+    }
 
     function showResult(success, msg) {
       uploadResult.hidden = false;

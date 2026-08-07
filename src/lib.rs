@@ -107,66 +107,151 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             }))?
             .with_headers(cors::headers()?))
         })
-        // POST /admin/api/upload — upload file to R2 + D1
-        .post_async("/admin/api/upload", |mut req, ctx| async move {
-            // Verify Cloudflare Access JWT
+        // POST /admin/api/upload/start — create multipart upload
+        .post_async("/admin/api/upload/start", |mut req, ctx| async move {
             let claims = auth::verify_access_jwt(&req, &ctx).await?;
-            console_log!("Upload by: {:?}", claims.email);
+            console_log!("Upload start by: {:?}", claims.email);
 
-            let form = req.form_data().await?;
-
-            // Extract file from form data
-            let file_entry = form
-                .get("file")
-                .ok_or_else(|| worker::Error::RustError("no file field".into()))?;
-
-            let (file_name, content_type, file_bytes) = match file_entry {
-                FormEntry::File(f) => {
-                    let name = f.name();
-                    let ct = f.type_();
-                    let bytes = f.bytes().await?;
-                    (name, ct, bytes)
-                }
-                FormEntry::Field(_) => {
-                    return Ok(Response::error("file field is not a file", 400)?
-                        .with_headers(cors::headers()?));
-                }
-            };
-
-            // Use custom path if provided, otherwise auto-generate
-            let custom_path = form
-                .get("path")
-                .and_then(|entry| match entry {
-                    FormEntry::Field(f) => Some(f),
-                    _ => None,
-                })
-                .filter(|v| !v.is_empty());
+            let body: serde_json::Value = req.json().await?;
+            let filename = body["filename"].as_str().unwrap_or("unnamed");
+            let content_type = body["content_type"]
+                .as_str()
+                .unwrap_or("application/octet-stream");
+            let custom_path = body["path"].as_str().filter(|s| !s.is_empty());
 
             let key = if let Some(path) = custom_path {
                 if path.ends_with('/') {
-                    format!("{}{}", path, file_name)
+                    format!("{}{}", path, filename)
                 } else {
-                    path
+                    path.to_string()
                 }
             } else {
                 let ts = Date::now().as_millis();
-                format!("uploads/{}/{}", ts / 86400000, file_name)
+                format!("uploads/{}/{}", ts / 86400000, filename)
             };
 
-            // Upload to R2
             let bucket = ctx.bucket("FILE_BUCKET")?;
-            bucket.put(&key, file_bytes.clone()).execute().await?;
+            let metadata = HttpMetadata {
+                content_type: Some(content_type.to_string()),
+                ..Default::default()
+            };
+            let upload = bucket
+                .create_multipart_upload(&key)
+                .http_metadata(metadata)
+                .execute()
+                .await?;
+            let upload_id = upload.upload_id().await;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "upload_id": upload_id,
+                "key": key,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // PUT /admin/api/upload/part — upload one chunk (raw bytes)
+        .put_async("/admin/api/upload/part", |mut req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let upload_id = qs.get("upload_id").cloned().unwrap_or_default();
+            let key = decode_key(&qs.get("key").cloned().unwrap_or_default());
+            let part_number: u16 = qs.get("n").and_then(|v| v.parse().ok()).unwrap_or(0);
+
+            if upload_id.is_empty() || key.is_empty() || part_number == 0 {
+                return Ok(
+                    Response::error("Bad Request: missing upload_id, key, or n", 400)?
+                        .with_headers(cors::headers()?),
+                );
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+            let bytes = req.bytes().await?;
+            let part = upload.upload_part(part_number, bytes).await?;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "part_number": part.part_number(),
+                "etag": part.etag(),
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/upload/complete — complete multipart upload + D1 insert
+        .post_async("/admin/api/upload/complete", |mut req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let upload_id = qs.get("upload_id").cloned().unwrap_or_default();
+            let key = decode_key(&qs.get("key").cloned().unwrap_or_default());
+
+            if upload_id.is_empty() || key.is_empty() {
+                return Ok(
+                    Response::error("Bad Request: missing upload_id or key", 400)?
+                        .with_headers(cors::headers()?),
+                );
+            }
+
+            let body: serde_json::Value = req.json().await?;
+            let parts_json = body["parts"]
+                .as_array()
+                .ok_or_else(|| worker::Error::RustError("missing parts array".into()))?;
+            let content_type = body["content_type"]
+                .as_str()
+                .unwrap_or("application/octet-stream");
+
+            let uploaded_parts: Vec<UploadedPart> = parts_json
+                .iter()
+                .map(|p| {
+                    UploadedPart::new(
+                        p["n"].as_u64().unwrap_or(0) as u16,
+                        p["etag"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+            let obj = upload.complete(uploaded_parts).await?;
+            let size = obj.size() as i64;
 
             // Insert record into D1
-            db::insert_file(&ctx, &key, file_bytes.len() as i64, &content_type).await?;
+            db::insert_file(&ctx, &key, size, content_type).await?;
 
+            console_log!("Upload complete: key={}, size={}", key, size);
             Ok(Response::from_json(&serde_json::json!({
                 "ok": true,
                 "key": key,
-                "size": file_bytes.len(),
-                "content_type": content_type,
+                "size": size,
             }))?
             .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/upload — abort multipart upload
+        .delete_async("/admin/api/upload", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let upload_id = qs.get("upload_id").cloned().unwrap_or_default();
+            let key = decode_key(&qs.get("key").cloned().unwrap_or_default());
+
+            if upload_id.is_empty() || key.is_empty() {
+                return Ok(
+                    Response::error("Bad Request: missing upload_id or key", 400)?
+                        .with_headers(cors::headers()?),
+                );
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+            upload.abort().await?;
+
+            console_log!("Upload aborted: key={}", key);
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
         })
         // DELETE /admin/api/files/*key — delete file from R2 + D1 (wildcard matches keys with /)
         .delete_async("/admin/api/files/*key", |req, ctx| async move {
