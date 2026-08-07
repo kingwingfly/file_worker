@@ -57,7 +57,6 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let bucket = ctx.bucket("FILE_BUCKET")?;
             let raw = ctx.param("key").map_or("", |v| v);
             let key = decode_key(raw);
-            console_log!("Serving file: raw_param={}, decoded_key={}", raw, key);
             let url = req.url()?;
             let query_pairs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
@@ -156,7 +155,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let qs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
             let upload_id = qs.get("upload_id").cloned().unwrap_or_default();
-            let key = decode_key(&qs.get("key").cloned().unwrap_or_default());
+            // query_pairs() already percent-decodes — do NOT decode_key() here
+            let key = qs.get("key").cloned().unwrap_or_default();
             let part_number: u16 = qs.get("n").and_then(|v| v.parse().ok()).unwrap_or(0);
 
             if upload_id.is_empty() || key.is_empty() || part_number == 0 {
@@ -185,7 +185,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let qs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
             let upload_id = qs.get("upload_id").cloned().unwrap_or_default();
-            let key = decode_key(&qs.get("key").cloned().unwrap_or_default());
+            // query_pairs() already percent-decodes — do NOT decode_key() here
+            let key = qs.get("key").cloned().unwrap_or_default();
 
             if upload_id.is_empty() || key.is_empty() {
                 return Ok(
@@ -217,16 +218,25 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let obj = upload.complete(uploaded_parts).await?;
             let size = obj.size() as i64;
 
-            // Insert record into D1
-            db::insert_file(&ctx, &key, size, content_type).await?;
-
-            console_log!("Upload complete: key={}, size={}", key, size);
-            Ok(Response::from_json(&serde_json::json!({
-                "ok": true,
-                "key": key,
-                "size": size,
-            }))?
-            .with_headers(cors::headers()?))
+            // Insert record into D1. If this fails, clean up the R2 object.
+            match db::insert_file(&ctx, &key, size, content_type).await {
+                Ok(()) => {
+                    console_log!("Upload complete: key={}, size={}", key, size);
+                    Ok(Response::from_json(&serde_json::json!({
+                        "ok": true,
+                        "key": key,
+                        "size": size,
+                    }))?
+                    .with_headers(cors::headers()?))
+                }
+                Err(e) => {
+                    // D1 insert failed — delete the committed R2 object so it doesn't
+                    // become an invisible storage leak.
+                    console_log!("D1 insert failed for key={}, cleaning up R2 object: {:?}", key, e);
+                    let _ = bucket.delete(&key).await;
+                    Err(e)
+                }
+            }
         })
         // DELETE /admin/api/upload — abort multipart upload
         .delete_async("/admin/api/upload", |req, ctx| async move {
@@ -236,7 +246,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let qs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
             let upload_id = qs.get("upload_id").cloned().unwrap_or_default();
-            let key = decode_key(&qs.get("key").cloned().unwrap_or_default());
+            // query_pairs() already percent-decodes — do NOT decode_key() here
+            let key = qs.get("key").cloned().unwrap_or_default();
 
             if upload_id.is_empty() || key.is_empty() {
                 return Ok(
@@ -261,19 +272,20 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
             let raw = ctx.param("key").map_or("", |v| v);
             let key = decode_key(raw);
-            console_log!("Deleting file: raw_param={}, decoded_key={}", raw, key);
 
             if key.is_empty() {
                 return Ok(Response::error("Bad Request: missing key", 400)?
                     .with_headers(cors::headers()?));
             }
 
-            // Delete from D1 first (by ref), then R2 (by value)
+            // Delete from R2 first, then D1.
+            // If R2 fails, D1 row remains visible → retryable from UI.
+            // If D1 fails after R2 success, the object is already gone
+            // but retry works (R2 delete is idempotent, D1 delete is a no-op).
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            bucket.delete(&key).await?;
             let deleted_key = key.clone();
             db::delete_file(&ctx, &key).await?;
-
-            let bucket = ctx.bucket("FILE_BUCKET")?;
-            bucket.delete(key).await?;
 
             Ok(Response::from_json(&serde_json::json!({"ok": true, "deleted": deleted_key}))?
                 .with_headers(cors::headers()?))

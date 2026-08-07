@@ -48,7 +48,7 @@ pub async fn insert_file(
     )
     .bind(&[
         JsValue::from(&D1Type::Text(key)),
-        JsValue::from(&D1Type::Integer(size as i32)),
+        JsValue::from(&D1Type::Real(size as f64)),
         JsValue::from(&D1Type::Text(content_type)),
     ])?
     .run()

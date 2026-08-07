@@ -340,8 +340,8 @@
         uploadId = startData.upload_id;
         key = startData.key;
 
-        // 2. Upload chunks
-        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        // 2. Upload chunks — ensure at least 1 part (R2 requires ≥1 part, even for 0-byte files)
+        const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
         const parts = [];
         let uploadedBytes = 0;
 
@@ -422,9 +422,13 @@
 
         xhr.addEventListener('load', () => {
           if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(JSON.parse(xhr.responseText));
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch (e) {
+              reject(new Error(`Part ${partNumber}: invalid JSON response`));
+            }
           } else {
-            reject(new Error(`Part ${partNumber}: HTTP ${xhr.status}`));
+            reject(new Error(`Part ${partNumber}: HTTP ${xhr.status} — ${xhr.responseText?.substring(0, 200)}`));
           }
         });
 
@@ -498,7 +502,7 @@
     function formatSize(bytes) {
       if (!bytes || bytes === 0) return '0 B';
       const k = 1024;
-      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
       const i = Math.floor(Math.log(bytes) / Math.log(k));
       return (bytes / Math.pow(k, i)).toFixed(i > 0 ? 1 : 0) + ' ' + sizes[i];
     }
