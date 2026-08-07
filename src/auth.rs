@@ -37,17 +37,14 @@ struct JwksResponse {
 /// Returns `Ok(AccessClaims)` if valid, or an error response.
 pub async fn verify_access_jwt(req: &Request, ctx: &RouteContext<()>) -> Result<AccessClaims> {
     // Extract JWT from Cf-Access-Jwt-Assertion cookie
-    let cookie_header = req
-        .headers()
-        .get("Cookie")?
-        .unwrap_or_default();
+    let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
 
     let jwt = extract_cookie(&cookie_header, "CF_Authorization")
         .ok_or_else(|| worker::Error::RustError("missing CF_Authorization cookie".into()))?;
 
     // Decode JWT header and payload without verifying signature first
-    let header = decode_jwt_header(&jwt)?;
-    let payload = decode_jwt_payload::<AccessClaims>(&jwt)?;
+    let header = decode_jwt_header(jwt)?;
+    let payload = decode_jwt_payload::<AccessClaims>(jwt)?;
 
     // Validate expiration
     if let Some(exp) = payload.exp {
@@ -89,7 +86,7 @@ pub async fn verify_access_jwt(req: &Request, ctx: &RouteContext<()>) -> Result<
         .ok_or_else(|| worker::Error::RustError("no matching JWKS key found".into()))?;
 
     // Verify JWT signature using Web Crypto
-    verify_jwt_signature(&jwt, key, &header)?;
+    verify_jwt_signature(jwt, key, &header)?;
 
     Ok(payload)
 }
