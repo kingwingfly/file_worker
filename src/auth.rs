@@ -1,5 +1,5 @@
 use base64::Engine;
-use rsa::{pkcs1v15::Pkcs1v15Sign, RsaPublicKey};
+use rsa::{pkcs1v15::Pkcs1v15Sign, BoxedUint, RsaPublicKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -92,7 +92,7 @@ pub async fn verify_access_jwt(
     // Extract JWT from CF_Authorization cookie
     let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
     let token = extract_cookie(&cookie_header, "CF_Authorization")
-        .ok_or_else(|| worker::Error::RustError("missing CF_Authorization cookie".into()))?;
+        .ok_or_else(|| err("missing CF_Authorization cookie"))?;
 
     verify(token, env, &team_domain, &expected_aud, now).await
 }
@@ -144,10 +144,10 @@ async fn verify(
         }
     };
 
-    let n = rsa::BigUint::from_bytes_be(
+    let n = BoxedUint::from_be_slice_vartime(
         &b64url(&n_bytes).ok_or_else(|| err("bad JWK n"))?,
     );
-    let e = rsa::BigUint::from_bytes_be(
+    let e = BoxedUint::from_be_slice_vartime(
         &b64url(&e_bytes).ok_or_else(|| err("bad JWK e"))?,
     );
     let key = RsaPublicKey::new(n, e).map_err(|e| err_msg("bad RSA key", e))?;
@@ -155,8 +155,8 @@ async fn verify(
     // Verify signature
     let signing_input = format!("{h}.{p}");
     let digest = Sha256::digest(signing_input.as_bytes());
-    let sig = b64url(s).ok_or_else(|| err("bad signature b64"))?;
-    key.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &sig)
+    let sig_bytes = b64url(s).ok_or_else(|| err("bad signature b64"))?;
+    key.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &sig_bytes)
         .map_err(|e| err_msg("signature verification failed", e))?;
 
     // Parse and validate claims
