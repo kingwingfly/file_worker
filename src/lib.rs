@@ -44,8 +44,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             }))?
             .with_headers(cors::headers()?))
         })
-        // GET /api/file/:key — serve file from R2
-        .get_async("/api/file/:key", |req, ctx| async move {
+        // GET /api/file/*key — serve file from R2 (wildcard matches keys with /)
+        .get_async("/api/file/*key", |req, ctx| async move {
             let bucket = ctx.bucket("FILE_BUCKET")?;
             let key = ctx.param("key").map_or("", |v| v);
             let url = req.url()?;
@@ -158,8 +158,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             }))?
             .with_headers(cors::headers()?))
         })
-        // DELETE /admin/api/files/:key — delete file from R2 + D1
-        .delete_async("/admin/api/files/:key", |req, ctx| async move {
+        // DELETE /admin/api/files/*key — delete file from R2 + D1 (wildcard matches keys with /)
+        .delete_async("/admin/api/files/*key", |req, ctx| async move {
             // Verify Cloudflare Access JWT
             let claims = auth::verify_access_jwt(&req, &ctx).await?;
             console_log!("Delete by: {:?}", claims.email);
