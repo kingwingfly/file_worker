@@ -8,6 +8,7 @@ node_modules/
 # Wrangler
 .wrangler/
 .dev.vars
+wrangler.toml
 
 # Build output (worker-build)
 /build/
