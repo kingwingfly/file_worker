@@ -12,6 +12,38 @@ fn decode_key(encoded: &str) -> String {
     percent_decode_str(encoded).decode_utf8_lossy().into_owned()
 }
 
+/// Parse an HTTP `Range: bytes=...` header value into an R2 Range.
+fn parse_range(header: &str) -> Option<worker::Range> {
+    let v = header.strip_prefix("bytes=")?;
+    if v.contains(',') {
+        return None; // multi-range — not supported
+    }
+    if let Some(suffix) = v.strip_prefix('-') {
+        return Some(worker::Range::Suffix { suffix: suffix.trim().parse().ok()? });
+    }
+    if let Some(rest) = v.strip_suffix('-') {
+        return Some(worker::Range::OffsetToEnd { offset: rest.trim().parse().ok()? });
+    }
+    let (start, end) = v.split_once('-')?;
+    let start: u64 = start.trim().parse().ok()?;
+    let end: u64 = end.trim().parse().ok()?;
+    if start > end {
+        return None;
+    }
+    Some(worker::Range::OffsetWithLength { offset: start, length: end - start + 1 })
+}
+
+/// Compute Content-Range bounds from the requested Range and total file size.
+fn range_bounds(range: worker::Range, total: u64) -> (u64, u64) {
+    let last = total.saturating_sub(1);
+    match range {
+        worker::Range::OffsetWithLength { offset, length } => (offset, (offset + length - 1).min(last)),
+        worker::Range::OffsetToEnd { offset } => (offset, last),
+        worker::Range::Prefix { length } => (0, (length - 1).min(last)),
+        worker::Range::Suffix { suffix } => (total.saturating_sub(suffix), last),
+    }
+}
+
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
     // Handle CORS preflight
@@ -61,6 +93,35 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let query_pairs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
             let is_download = query_pairs.get("download").map(|s| s.as_str()) == Some("1");
+
+            // Range support for video/audio seeking.
+            // On any failure we silently fall through to the full-file serve below.
+            if !is_download {
+                if let Some(range_str) = req.headers().get("Range").ok().flatten() {
+                    if let Some(r) = parse_range(&range_str) {
+                        let r2 = r.clone();
+                        if let Ok(Some(obj)) = bucket.get(&key).range(r).execute().await {
+                            if let Some(body) = obj.body() {
+                                let total = obj.size();
+                                let meta = obj.http_metadata();
+                                let ct = meta.content_type.as_deref().unwrap_or("application/octet-stream");
+                                let (rs, re) = range_bounds(r2, total);
+
+                                let mut headers = Headers::new();
+                                headers.set("Content-Type", ct)?;
+                                headers.set("Accept-Ranges", "bytes")?;
+                                headers.set("Content-Range", &format!("bytes {}-{}/{}", rs, re, total))?;
+                                headers.set("Content-Length", &(re - rs + 1).to_string())?;
+                                cors::extend_headers(&mut headers)?;
+
+                                return Ok(Response::from_body(body.response_body()?)?
+                                    .with_status(206)
+                                    .with_headers(headers));
+                            }
+                        }
+                    }
+                }
+            }
 
             match bucket.get(&key).execute().await? {
                 Some(object) => {

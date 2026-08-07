@@ -210,7 +210,12 @@ function openPreview(file) {
   } else if (ct.startsWith('audio/')) {
     const wrapper = document.createElement('div');
     wrapper.style.textAlign = 'center';
-    wrapper.style.padding = '2rem';
+    wrapper.style.padding = '3rem 2rem';
+    wrapper.style.width = '100%';
+    wrapper.style.display = 'flex';
+    wrapper.style.flexDirection = 'column';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.justifyContent = 'center';
 
     const visualizer = document.createElement('div');
     visualizer.className = 'audio-visualizer';

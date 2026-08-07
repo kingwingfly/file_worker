@@ -549,17 +549,23 @@ body::after {
 
 .modal-media audio {
   width: 90%;
-  max-width: 500px;
-  margin: 2rem 0;
+  max-width: 600px;
+  height: 54px;
+  margin: 2rem auto;
+  display: block;
+}
+
+.modal-media audio::-webkit-media-controls-panel {
+  background: #fff;
 }
 
 .modal-media .audio-visualizer {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  gap: 3px;
-  height: 80px;
-  margin-bottom: 1rem;
+  gap: 4px;
+  height: 100px;
+  margin-bottom: 1.5rem;
 }
 
 .audio-visualizer .bar {
