@@ -3,87 +3,86 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>🐱 File Neko — 你的可爱文件画廊</title>
+  <title>💫 きらきら</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="site-header">
+    <div class="header-decorations" aria-hidden="true">
+      <span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span>
+    </div>
     <div class="header-content">
       <h1 class="site-title">
-        <span class="title-emoji">🐱</span>
-        File Neko
-        <span class="title-emoji">🐾</span>
+        <span class="title-sparkle">💫</span>
+        きらきら
+        <span class="title-sparkle">💫</span>
       </h1>
-      <p class="site-subtitle">你的可爱文件画廊 ✨ your cute file gallery</p>
     </div>
-    <div class="header-paws">
+    <div class="header-paws" aria-hidden="true">
       <span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span><span>🐾</span>
     </div>
   </header>
 
-  <nav class="filter-bar" aria-label="Filter media types">
+  <nav class="filter-bar" aria-label="筛选">
     <button class="filter-btn active" data-filter="all" aria-pressed="true">
-      📂 All
+      ✨ 全部
     </button>
-    <span class="filter-sep">🐾</span>
     <button class="filter-btn" data-filter="image" aria-pressed="false">
-      🖼 Images
+      🖼️ 图片
     </button>
-    <span class="filter-sep">🐾</span>
     <button class="filter-btn" data-filter="video" aria-pressed="false">
-      🎬 Videos
+      🎬 视频
     </button>
-    <span class="filter-sep">🐾</span>
     <button class="filter-btn" data-filter="audio" aria-pressed="false">
-      🎵 Audio
+      🎵 音频
     </button>
   </nav>
 
-  <main id="gallery" class="gallery-grid" aria-label="Media gallery">
+  <main id="gallery" class="gallery-grid" aria-label="切片画廊">
     <!-- Cards rendered by JavaScript -->
   </main>
 
-  <div id="spinner" class="spinner" hidden aria-label="Loading">
+  <div id="spinner" class="spinner" hidden aria-label="加载中">
     <span class="paw">🐾</span>
     <span class="paw">🐾</span>
     <span class="paw">🐾</span>
   </div>
 
   <div id="empty-state" class="empty-state" hidden>
-    <div class="empty-cat">😴🐱</div>
-    <p class="empty-title">还没有文件哦~</p>
-    <p class="empty-subtitle">No files yet~ Upload something cute!</p>
+    <div class="empty-emoji">💤</div>
+    <p class="empty-title">还没有切片呢...</p>
+    <p class="empty-subtitle">等主人来投喂~ 🍰</p>
   </div>
 
   <div id="error-box" class="error-box" hidden>
-    <div class="error-cat">🙀</div>
-    <p class="error-title">Oops! Something went wrong</p>
+    <div class="error-emoji">💦</div>
+    <p class="error-title">呜...出了一点小问题</p>
     <p class="error-detail" id="error-detail"></p>
-    <button id="retry-btn" class="btn-retry">🔄 Retry</button>
+    <button id="retry-btn" class="btn-retry">🔄 再试一下</button>
   </div>
 
   <div class="load-more-wrapper" id="load-more-wrapper" hidden>
     <button id="load-more-btn" class="btn-load-more">
-      🐾 Load More 🐾
+      🐾 もっと 🐾
     </button>
   </div>
 
   <!-- Preview Modal -->
-  <div id="preview-modal" class="modal" role="dialog" aria-modal="true" aria-label="Media preview" hidden>
+  <div id="preview-modal" class="modal" role="dialog" aria-modal="true" aria-label="预览" hidden>
     <div class="modal-backdrop"></div>
     <div class="modal-card">
-      <button class="modal-close" aria-label="Close preview">✕</button>
+      <button class="modal-close" aria-label="关闭">✕</button>
       <div id="modal-media" class="modal-media"></div>
       <div class="modal-info">
         <span id="modal-filename" class="modal-filename"></span>
-        <button id="modal-download" class="btn-download">💾 Download</button>
+        <button id="modal-download" class="btn-download">💾</button>
       </div>
     </div>
   </div>
 
   <footer class="site-footer">
     <div class="footer-paws">🐾 🐾 🐾</div>
-    <p>Made with 💖 and 🐱 — File Neko</p>
+    <p>💖 with 🐾</p>
   </footer>
 
   <script defer src="app.js"></script>

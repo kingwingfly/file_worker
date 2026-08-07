@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>🐱 File Neko — Admin</title>
+  <title>💫 管理</title>
   <link rel="stylesheet" href="style.css">
   <style>
     .admin-container {
@@ -133,11 +133,11 @@
       color: #C0392B;
     }
 
-    .file-list {
+    .clip-list {
       list-style: none;
     }
 
-    .file-list-item {
+    .clip-list-item {
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -146,9 +146,9 @@
       gap: 0.75rem;
     }
 
-    .file-list-item:last-child { border-bottom: none; }
+    .clip-list-item:last-child { border-bottom: none; }
 
-    .file-list-name {
+    .clip-list-name {
       flex: 1;
       font-size: 0.9rem;
       font-weight: 500;
@@ -157,7 +157,7 @@
       white-space: nowrap;
     }
 
-    .file-list-size { font-size: 0.8rem; color: var(--text-light); white-space: nowrap; }
+    .clip-list-size { font-size: 0.8rem; color: var(--text-light); white-space: nowrap; }
 
     .btn-delete {
       background: none;
@@ -194,39 +194,38 @@
   <header class="site-header">
     <div class="header-content">
       <h1 class="site-title">
-        <span class="title-emoji">🐱</span>
-        File Neko Admin
+        <span class="title-sparkle">🔐</span>
+        管理
+        <span class="title-sparkle">✨</span>
       </h1>
-      <p class="site-subtitle">上传 & 管理你的文件 ✨ Upload & Manage</p>
     </div>
   </header>
 
   <div class="admin-container">
     <div class="admin-header">
-      <h2>🔐 管理员面板</h2>
-      <a href="/" class="back-link">← 返回画廊 Back to Gallery</a>
+      <h2>📤 投喂切片</h2>
+      <a href="/" class="back-link">← 回画廊</a>
     </div>
 
     <!-- Upload Section -->
     <div class="admin-section">
-      <h2>📤 上传文件 Upload</h2>
+      <h2>🍰 上传新切片</h2>
 
       <div class="upload-zone" id="upload-zone">
         <div class="upload-zone-icon">🐾</div>
-        <div class="upload-zone-text">点击或拖拽文件到此处</div>
-        <div class="upload-zone-hint">Click or drag & drop files here</div>
-        <div class="upload-zone-hint">支持 Support: JPG, PNG, GIF, MP4, WEBM, MP3, WAV, etc.</div>
+        <div class="upload-zone-text">点击或拖拽到此处</div>
+        <div class="upload-zone-hint">支持 JPG, PNG, GIF, MP4, WEBM, MP3, WAV 等</div>
         <input type="file" id="file-input" accept="image/*,video/*,audio/*">
       </div>
 
       <div class="form-group">
-        <label for="custom-path">📁 自定义路径 Custom Path (optional)</label>
-        <input type="text" id="custom-path" placeholder="e.g. photos/vacation/ 或 my-file.jpg">
-        <div class="form-hint">留空则自动生成路径。If blank, path is auto-generated.</div>
+        <label for="custom-path">📁 自定义路径 (选填)</label>
+        <input type="text" id="custom-path" placeholder="例如: oshi/2024/ 或 my-clip.mp4">
+        <div class="form-hint">留空则自动生成路径</div>
       </div>
 
       <button class="btn-upload" id="upload-btn" disabled>
-        🚀 上传 Upload
+        🚀 上传
       </button>
 
       <div class="upload-progress" hidden id="progress-wrapper">
@@ -236,12 +235,12 @@
       <div class="upload-result" hidden id="upload-result"></div>
     </div>
 
-    <!-- Files List Section -->
+    <!-- Clip List Section -->
     <div class="admin-section">
-      <h2>📋 文件列表 Files</h2>
-      <ul class="file-list" id="admin-file-list">
-        <li class="file-list-item" style="justify-content:center; color: var(--text-light);">
-          加载中... Loading...
+      <h2>📋 切片列表</h2>
+      <ul class="clip-list" id="admin-clip-list">
+        <li class="clip-list-item" style="justify-content:center; color: var(--text-light);">
+          加载中...
         </li>
       </ul>
     </div>
@@ -249,7 +248,7 @@
 
   <footer class="site-footer">
     <div class="footer-paws">🐾 🐾 🐾</div>
-    <p>Made with 💖 and 🐱 — File Neko Admin</p>
+    <p>💖 with 🐾</p>
   </footer>
 
   <script>
@@ -262,7 +261,7 @@
     const progressBar = document.getElementById('progress-bar');
     const uploadResult = document.getElementById('upload-result');
     const customPath = document.getElementById('custom-path');
-    const fileList = document.getElementById('admin-file-list');
+    const clipList = document.getElementById('admin-clip-list');
     let selectedFile = null;
 
     // File selection
@@ -298,7 +297,7 @@
       if (!selectedFile) return;
 
       uploadBtn.disabled = true;
-      uploadBtn.textContent = '⏳ 上传中 Uploading...';
+      uploadBtn.textContent = '⏳ 上传中...';
       progressWrapper.hidden = false;
       progressBar.style.width = '0%';
       uploadResult.hidden = true;
@@ -310,7 +309,6 @@
       }
 
       try {
-        // Simulate progress since fetch doesn't provide upload progress natively
         const progressInterval = setInterval(() => {
           const current = parseFloat(progressBar.style.width) || 0;
           if (current < 90) progressBar.style.width = (current + Math.random() * 10) + '%';
@@ -326,22 +324,22 @@
 
         if (resp.ok) {
           const data = await resp.json();
-          showResult(true, `✅ 上传成功! Uploaded: ${data.key} (${formatSize(data.size)})`);
+          showResult(true, `✅ 上传成功! ${data.key} (${formatSize(data.size)})`);
           customPath.value = '';
           selectedFile = null;
           fileInput.value = '';
-          document.querySelector('.upload-zone-text').textContent = '点击或拖拽文件到此处';
-          document.querySelector('.upload-zone-hint').textContent = 'Click or drag & drop files here';
-          loadFiles();
+          document.querySelector('.upload-zone-text').textContent = '点击或拖拽到此处';
+          document.querySelector('.upload-zone-hint').textContent = '支持图片、视频、音频';
+          loadClips();
         } else {
           const text = await resp.text();
-          showResult(false, `❌ 上传失败 Upload failed: ${resp.status} ${text}`);
+          showResult(false, `❌ 上传失败: ${resp.status} ${text}`);
         }
       } catch (err) {
-        showResult(false, `❌ 网络错误 Network error: ${err.message}`);
+        showResult(false, `❌ 网络错误: ${err.message}`);
       } finally {
         uploadBtn.disabled = true;
-        uploadBtn.textContent = '🚀 上传 Upload';
+        uploadBtn.textContent = '🚀 上传';
         setTimeout(() => { progressWrapper.hidden = true; }, 1000);
       }
     });
@@ -352,48 +350,48 @@
       uploadResult.textContent = msg;
     }
 
-    // Load files
-    async function loadFiles() {
+    // Load clips
+    async function loadClips() {
       try {
         const resp = await fetch('/admin/api/files');
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
-        renderFileList(data.files || []);
+        renderClipList(data.files || []);
       } catch (err) {
-        fileList.innerHTML = `<li class="file-list-item" style="justify-content:center; color: #C0392B;">
-          ❌ 加载失败 Failed to load: ${err.message}
+        clipList.innerHTML = `<li class="clip-list-item" style="justify-content:center; color: #C0392B;">
+          ❌ 加载失败: ${err.message}
         </li>`;
       }
     }
 
-    function renderFileList(files) {
+    function renderClipList(files) {
       if (files.length === 0) {
-        fileList.innerHTML = `<li class="file-list-item" style="justify-content:center; color: var(--text-light);">
-          😴 还没有文件 No files yet~
+        clipList.innerHTML = `<li class="clip-list-item" style="justify-content:center; color: var(--text-light);">
+          💤 还没有切片~
         </li>`;
         return;
       }
 
-      fileList.innerHTML = files.map(f => `
-        <li class="file-list-item">
-          <span class="file-list-name" title="${escapeHtml(f.key)}">📄 ${escapeHtml(f.key)}</span>
-          <span class="file-list-size">${formatSize(f.size)}</span>
-          <button class="btn-delete" onclick="deleteFile('${escapeAttr(f.key)}')">🗑 Delete</button>
+      clipList.innerHTML = files.map(f => `
+        <li class="clip-list-item">
+          <span class="clip-list-name" title="${escapeHtml(f.key)}">✨ ${escapeHtml(f.key)}</span>
+          <span class="clip-list-size">${formatSize(f.size)}</span>
+          <button class="btn-delete" onclick="deleteClip('${escapeAttr(f.key)}')">🗑 删除</button>
         </li>
       `).join('');
     }
 
-    async function deleteFile(key) {
-      if (!confirm(`确认删除 Delete "${key}"?`)) return;
+    async function deleteClip(key) {
+      if (!confirm(`确认删除 "${key}"?`)) return;
       try {
         const resp = await fetch(`/admin/api/files/${encodePath(key)}`, { method: 'DELETE' });
         if (resp.ok) {
-          loadFiles();
+          loadClips();
         } else {
-          alert('删除失败 Delete failed: ' + resp.status);
+          alert('删除失败: ' + resp.status);
         }
       } catch (err) {
-        alert('网络错误 Network error: ' + err.message);
+        alert('网络错误: ' + err.message);
       }
     }
 
@@ -420,7 +418,7 @@
     }
 
     // Initial load
-    loadFiles();
+    loadClips();
   </script>
 </body>
 </html>

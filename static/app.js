@@ -1,6 +1,5 @@
 /**
- * 🐱 File Neko — Frontend Application
- * Vanilla JS gallery with preview, download, filter, and pagination.
+ * 💫 VUP Clip Gallery — Frontend
  */
 'use strict';
 
@@ -84,7 +83,7 @@ async function fetchFiles() {
     updateLoadMore(data.files.length < data.limit);
     updateEmptyState();
   } catch (err) {
-    console.error('Failed to fetch files:', err);
+    console.error('Failed to fetch:', err);
     showError(err.message);
   } finally {
     state.loading = false;
@@ -97,10 +96,7 @@ function renderGallery() {
   const filtered = getFilteredFiles();
   dom.gallery.innerHTML = '';
 
-  if (filtered.length === 0) {
-    // Only show empty state if we've actually tried loading and have NO files
-    return;
-  }
+  if (filtered.length === 0) return;
 
   filtered.forEach((file, i) => {
     const card = createCard(file, i);
@@ -149,13 +145,13 @@ function createCard(file, index) {
     thumb.onclick = () => openPreview(file);
   } else {
     thumb.className = 'card-thumb placeholder';
-    thumb.textContent = '📄';
+    thumb.textContent = '✨';
     thumb.onclick = () => openPreview(file);
   }
 
   card.appendChild(thumb);
 
-  // Card body
+  // Card body — just name, size, and download
   const body = document.createElement('div');
   body.className = 'card-body';
 
@@ -167,12 +163,6 @@ function createCard(file, index) {
   const meta = document.createElement('div');
   meta.className = 'card-meta';
 
-  const badge = document.createElement('span');
-  if (ct.startsWith('image/')) { badge.className = 'card-badge badge-image'; badge.textContent = 'image'; }
-  else if (ct.startsWith('video/')) { badge.className = 'card-badge badge-video'; badge.textContent = 'video'; }
-  else if (ct.startsWith('audio/')) { badge.className = 'card-badge badge-audio'; badge.textContent = 'audio'; }
-  else { badge.className = 'card-badge'; badge.textContent = 'file'; }
-
   const size = document.createElement('span');
   size.className = 'card-size';
   size.textContent = formatFileSize(file.size);
@@ -180,10 +170,9 @@ function createCard(file, index) {
   const downloadBtn = document.createElement('button');
   downloadBtn.className = 'card-download';
   downloadBtn.textContent = '⬇';
-  downloadBtn.title = 'Download';
+  downloadBtn.title = '下载';
   downloadBtn.onclick = (e) => { e.stopPropagation(); downloadFile(file); };
 
-  meta.appendChild(badge);
   meta.appendChild(size);
   meta.appendChild(downloadBtn);
   body.appendChild(name);
@@ -311,20 +300,10 @@ function updateEmptyState() {
   const filtered = getFilteredFiles();
   const show = filtered.length === 0 && !state.loading;
   dom.emptyState.hidden = !show;
-
-  if (show && state.filter !== 'all') {
-    const labels = { image: 'image', video: 'video', audio: 'audio' };
-    dom.emptyState.querySelector('.empty-title').textContent =
-      `还没有 ${labels[state.filter] || ''} 文件哦~`;
-  } else if (show) {
-    dom.emptyState.querySelector('.empty-title').textContent = '还没有文件哦~';
-  }
 }
 
 // ── Utilities ──
 function encodePath(key) {
-  // Encode each path segment individually so slashes stay literal,
-  // allowing the router's wildcard to capture the full multi-segment key.
   return key.split('/').map(encodeURIComponent).join('/');
 }
 
