@@ -132,6 +132,21 @@ moov-at-tail fallback for files without `+faststart`.
 ## Frontend
 
 `static/admin.html` and `static/app.js` are plain inline JS, no build step.
+
+The upload holds a Screen Wake Lock so a long transfer isn't killed by an idle
+screen timeout. The browser **releases that lock itself whenever the page stops
+being visible** and never re-takes it, so the `visibilitychange` re-acquire in
+`admin.html` is load-bearing — delete it and one tab switch mid-upload silently
+ends the lock. `acquireWakeLock` also guards against a concurrent second
+request: two overlapping `request('screen')` calls orphan the first sentinel,
+which then keeps the screen awake forever with nothing holding a reference to
+release it.
+
+A `beforeunload` handler guards the same window, because the multipart abort
+lives in `doMultipartUpload`'s `catch` and never runs if the page is gone. Every
+browser ignores a custom message there and shows its own dialog — cancelling the
+event is the entire API surface, so don't add wording to it.
+
 Object keys are user-controlled: build list rows with DOM APIs and
 `addEventListener`, never `innerHTML` with `onclick="fn('${key}')"` — HTML
 entities (`&#39;`) escape out of that regardless of quote-escaping.

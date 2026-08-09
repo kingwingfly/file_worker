@@ -102,8 +102,11 @@
     .btn-upload:hover { background: #FF9AAF; transform: scale(1.02); }
     .btn-upload:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
-    .upload-progress {
+    #progress-wrapper {
       margin-top: 1rem;
+    }
+
+    .upload-progress {
       height: 6px;
       background: var(--soft-blue);
       border-radius: 3px;
@@ -123,6 +126,13 @@
       font-size: 0.8rem;
       color: var(--text-light);
       margin-top: 0.35rem;
+    }
+
+    .upload-wake-hint {
+      text-align: center;
+      font-size: 0.78rem;
+      color: var(--text-light);
+      margin-top: 0.2rem;
     }
 
     .upload-result {
@@ -347,9 +357,12 @@
         </div>
       </div>
 
-      <div class="upload-progress" hidden id="progress-wrapper">
-        <div class="upload-progress-bar" id="progress-bar" style="width:0%"></div>
+      <div id="progress-wrapper" hidden>
+        <div class="upload-progress">
+          <div class="upload-progress-bar" id="progress-bar" style="width:0%"></div>
+        </div>
         <div class="upload-progress-text" id="progress-text"></div>
+        <div class="upload-wake-hint" id="wake-hint" hidden></div>
       </div>
 
       <div class="upload-result" hidden id="upload-result"></div>
@@ -410,6 +423,78 @@
         document.querySelector('.upload-zone-hint').textContent =
           formatSize(file.size) + ' — ' + (file.type || 'unknown');
       }
+    });
+
+    // Screen Wake Lock — a multi-GB upload takes long enough that an idle
+    // screen timeout would otherwise suspend the machine mid-transfer.
+    //
+    // The browser releases the lock by itself whenever the page stops being
+    // visible, and does not re-take it when the page comes back. The
+    // visibilitychange handler below is therefore load-bearing, not a nicety:
+    // without it, one tab switch during a long upload silently ends the lock.
+    const wakeHint = document.getElementById('wake-hint');
+    let wakeLock = null;
+    let wakeLockPending = null;
+    let uploadInProgress = false;
+
+    async function acquireWakeLock() {
+      if (!('wakeLock' in navigator)) return false;
+      // Two callers (upload start, visibilitychange) can race here. Without
+      // this guard both requests resolve, the second overwrites `wakeLock`,
+      // and the first sentinel is orphaned — the screen then stays awake after
+      // the upload finishes, with nothing left holding a reference to release.
+      if (wakeLock || wakeLockPending) return !!wakeLock;
+      try {
+        wakeLockPending = navigator.wakeLock.request('screen');
+        wakeLock = await wakeLockPending;
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+        return true;
+      } catch (err) {
+        // NotAllowedError — typically battery saver, or the page isn't visible.
+        console.warn('Wake lock refused:', err);
+        wakeLock = null;
+        return false;
+      } finally {
+        wakeLockPending = null;
+      }
+    }
+
+    function releaseWakeLock() {
+      if (!wakeLock) return;
+      wakeLock.release().catch(() => { /* already gone */ });
+      wakeLock = null;
+    }
+
+    function setWakeHint(held) {
+      let msg;
+      if (!('wakeLock' in navigator)) {
+        msg = '⚠️ 此浏览器不支持屏幕常亮，上传期间请勿让设备休眠';
+      } else if (held) {
+        msg = '☕ 已阻止设备休眠';
+      } else {
+        msg = '⚠️ 无法阻止休眠（可能开启了省电模式），请勿让设备休眠';
+      }
+      wakeHint.textContent = msg + ' · 请勿关闭此页面';
+      wakeHint.hidden = false;
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (!uploadInProgress || document.visibilityState !== 'visible') return;
+      acquireWakeLock().then(setWakeHint);
+    });
+
+    // Closing the tab mid-upload kills the transfer and strands the multipart
+    // upload in R2 — the abort call lives in doMultipartUpload's catch, which
+    // never runs if the page is gone. Warn before that happens.
+    //
+    // Browsers deliberately ignore any custom message here and show their own
+    // generic dialog; the only thing that matters is that a handler cancelled
+    // the event. Chrome additionally requires the page to have had a user
+    // gesture, which an upload the admin clicked to start always satisfies.
+    window.addEventListener('beforeunload', (e) => {
+      if (!uploadInProgress) return;
+      e.preventDefault();
+      e.returnValue = ''; // legacy Chrome/Safari spelling, still needed
     });
 
     // Upload — multipart for large files
@@ -488,6 +573,9 @@
       document.getElementById('progress-text').textContent = '';
       uploadResult.hidden = true;
       dupWarning.hidden = true;
+
+      uploadInProgress = true;
+      acquireWakeLock().then(setWakeHint);
 
       let uploadId = null;
       let key = null;   // R2 object name, minted by the server
@@ -584,9 +672,17 @@
           } catch (_) { /* ignore abort errors */ }
         }
       } finally {
+        // Drop the lock as soon as the upload settles — the timeout below only
+        // lets the finished progress bar linger, and the screen shouldn't be
+        // held awake for that.
+        uploadInProgress = false;
+        releaseWakeLock();
         uploadBtn.disabled = true;
         uploadBtn.textContent = '🚀 上传';
-        setTimeout(() => { progressWrapper.hidden = true; }, 1500);
+        setTimeout(() => {
+          progressWrapper.hidden = true;
+          wakeHint.hidden = true;
+        }, 1500);
       }
     }
 
