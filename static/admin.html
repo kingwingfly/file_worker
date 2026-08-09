@@ -282,6 +282,10 @@
 
     .btn-rename-cancel:hover { background: #e0e0e0; }
 
+    /* Visibility is driven by the `hidden` attribute, which is how every
+       caller toggles this. It used to be `display: none` here plus a `.show`
+       class that nothing ever added — a class selector outranks the UA's
+       `[hidden]` rule, so the box could never appear at all. */
     .duplicate-warning {
       background: #FCF3CF;
       border: 1px solid #F9E79F;
@@ -289,10 +293,9 @@
       padding: 0.75rem 1rem;
       margin-top: 0.75rem;
       font-size: 0.9rem;
-      display: none;
     }
 
-    .duplicate-warning.show { display: block; }
+    .duplicate-warning[hidden] { display: none; }
 
     .admin-header {
       display: flex;
@@ -561,7 +564,9 @@
     // upload dies is a closed tab, a crash, or a sleeping machine, and none of
     // those reach a catch block.
     const SESSION_KEY = 'zcll.upload.session';
-    const PART_RETRIES = 4;
+    const PART_RETRIES = 6;          // 1+2+4+8+16s ≈ 31s of backoff
+    const OFFLINE_WAIT_MS = 120000;  // per offline pause
+    const MAX_OFFLINE_WAITS = 5;     // ≈10 min of tolerated disconnection
     let resumeFile = null; // in-memory File matching the stored session, if any
 
     const resumeBanner = document.getElementById('resume-banner');
@@ -687,7 +692,7 @@
       dupWarning.hidden = true;
 
       try {
-        const checkResp = await fetch('/admin/api/files/check-key', {
+        const checkResp = await fetchWithRetry('/admin/api/files/check-key', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -736,7 +741,7 @@
 
       let session;
       try {
-        const startResp = await fetch('/admin/api/upload/start', {
+        const startResp = await fetchWithRetry('/admin/api/upload/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -843,30 +848,55 @@
 
         uploadBtn.textContent = '⏳ 完成中...';
         progressBar.style.width = '100%';
-        const completeResp = await fetch(
-          `/admin/api/upload/complete?upload_id=${encodeURIComponent(session.upload_id)}&key=${encodePath(session.key)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              parts: session.parts,
-              content_type: session.contentType,
-              path: session.path,
-              overwrite: session.overwrite,
-            }),
+
+        // Complete is the one step that must never be blindly retried: a
+        // success whose response was lost leaves the multipart upload consumed,
+        // so a second attempt errors forever over a file that is already in the
+        // bucket. Reconcile against the listing before believing the failure.
+        let completeData;
+        try {
+          const completeResp = await fetch(
+            `/admin/api/upload/complete?upload_id=${encodeURIComponent(session.upload_id)}&key=${encodePath(session.key)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                parts: session.parts,
+                content_type: session.contentType,
+                path: session.path,
+                overwrite: session.overwrite,
+              }),
+            }
+          );
+          if (completeResp.status === 409) {
+            // Someone took this name while the session was paused. The server
+            // refused rather than overwriting them — this session is dead.
+            const d = await completeResp.json().catch(() => ({}));
+            throw uploadError(
+              `名称 "${d.path || session.path}" 已被其他文件占用，无法完成续传。`, 409, true);
           }
-        );
-        if (completeResp.status === 409) {
-          // Someone took this name while the session was paused. The server
-          // refused rather than overwriting them — this session is dead.
-          const d = await completeResp.json().catch(() => ({}));
-          throw uploadError(
-            `名称 "${d.path || session.path}" 已被其他文件占用，无法完成续传。`, 409);
+          if (!completeResp.ok) {
+            throw uploadError(await errorMessage(completeResp), completeResp.status);
+          }
+          completeData = await completeResp.json();
+        } catch (err) {
+          if (err.fatal) throw err;
+          const landed = await uploadLanded(session);
+          if (landed) {
+            completeData = { path: landed.path, size: landed.size };
+          } else {
+            // Genuinely not committed. Resume can retry this, but only twice —
+            // if complete() consumed the upload and the D1 insert then failed,
+            // the handler deleted the object and no retry can ever succeed.
+            // Bail out rather than leaving the admin in a Resume loop.
+            session.completeFailures = (session.completeFailures || 0) + 1;
+            saveSession(session);
+            if (session.completeFailures >= 2) {
+              throw uploadError(`无法完成上传（${err.message}）。请放弃并重新上传。`, err.status, true);
+            }
+            throw err;
+          }
         }
-        if (!completeResp.ok) {
-          throw uploadError(await errorMessage(completeResp), completeResp.status);
-        }
-        const completeData = await completeResp.json();
 
         clearSession();
         resumeFile = null;
@@ -881,7 +911,7 @@
 
       } catch (err) {
         console.error('Upload error:', err);
-        const resumable = session.parts.length > 0 && err.status !== 409;
+        const resumable = session.parts.length > 0 && !err.fatal;
         if (resumable) {
           // Deliberately no abort call. Aborting here is what used to throw
           // away every part already transferred; leaving the multipart upload
@@ -914,9 +944,13 @@
       }
     }
 
-    function uploadError(message, status) {
+    // `fatal` marks a failure that resuming cannot fix, so the catch in
+    // runUpload aborts and clears instead of offering a Resume that is
+    // guaranteed to fail again.
+    function uploadError(message, status, fatal) {
       const err = new Error(message);
       err.status = status;
+      err.fatal = !!fatal;
       return err;
     }
 
@@ -932,19 +966,91 @@
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+    // Backoff is the wrong wait when the machine is simply offline: a lift, a
+    // tunnel or a DHCP renew outlasts any schedule worth writing, and retrying
+    // into a dead interface just burns the budget. Wait for the connection
+    // instead — capped, because a browser that reports onLine incorrectly must
+    // not be able to wedge the upload forever.
+    function waitForOnline(capMs) {
+      if (navigator.onLine !== false) return sleep(0);
+      return new Promise(resolve => {
+        const done = () => {
+          window.removeEventListener('online', done);
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, capMs);
+        window.addEventListener('online', done);
+      });
+    }
+
     async function uploadChunkWithRetry(session, partNumber, blob, onProgress) {
-      for (let attempt = 1; ; attempt++) {
+      let attempt = 0;
+      let offlineWaits = 0;
+      for (;;) {
         try {
           return await uploadChunk(session.upload_id, session.key, partNumber, blob, onProgress);
         } catch (err) {
           if (err.status === 401 || err.status === 403) {
             throw uploadError('管理会话已过期，请刷新页面后继续上传。', err.status);
           }
-          if (!isRetryable(err) || attempt >= PART_RETRIES) throw err;
-          uploadBtn.textContent = `⏳ 分片 ${partNumber} 重试 ${attempt}/${PART_RETRIES - 1}...`;
+          if (!isRetryable(err)) throw err;
           onProgress(0); // the chunk restarts from zero; un-count the partial send
-          await sleep(1000 * Math.pow(2, attempt - 1)); // 1s, 2s, 4s
+
+          // Being offline is a pause, not a failed attempt, so it does not
+          // consume the retry budget — a long tunnel costs nothing, while a
+          // server that is genuinely broken still gives up on schedule.
+          if (navigator.onLine === false && offlineWaits < MAX_OFFLINE_WAITS) {
+            offlineWaits++;
+            uploadBtn.textContent = `📴 分片 ${partNumber} 等待网络恢复...`;
+            await waitForOnline(OFFLINE_WAIT_MS);
+            continue;
+          }
+
+          attempt++;
+          if (attempt >= PART_RETRIES) throw err;
+          uploadBtn.textContent = `⏳ 分片 ${partNumber} 重试 ${attempt}/${PART_RETRIES - 1}...`;
+          await sleep(1000 * Math.pow(2, attempt - 1));
         }
+      }
+    }
+
+    // Retried only where replaying a lost response is cheap. Deliberately NOT
+    // used for rename or delete: both resolve a row by path, so replaying one
+    // whose response was lost reports "not found" for work that succeeded —
+    // turning a success into a spurious error. Those are one click to repeat.
+    async function fetchWithRetry(url, opts, attempts = 3) {
+      for (let i = 1; ; i++) {
+        try {
+          const resp = await fetch(url, opts);
+          if ((resp.status === 429 || resp.status >= 500) && i < attempts) {
+            await sleep(1000 * Math.pow(2, i - 1));
+            continue;
+          }
+          return resp;
+        } catch (err) {
+          // TypeError — the request never reached anyone.
+          if (i >= attempts) throw err;
+          await sleep(1000 * Math.pow(2, i - 1));
+        }
+      }
+    }
+
+    // Did this upload actually land? complete() can succeed server-side with
+    // the response lost in transit, and the multipart upload is consumed either
+    // way — so retrying or resuming would fail forever over a file that is
+    // sitting in the bucket. The storage key is unique per upload, which makes
+    // the listing decisive where a path check would not be. list_files orders
+    // uploaded_at DESC inside its 1000-row window, so a row written seconds ago
+    // is at the front. Returns null for "no" *and* for "couldn't tell".
+    async function uploadLanded(session) {
+      try {
+        const resp = await fetchWithRetry('/admin/api/files', undefined, 2);
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        return (data.files || []).find(f => f.key === session.key) || null;
+      } catch (_) {
+        return null;
       }
     }
 
@@ -995,7 +1101,7 @@
     // Load files
     async function loadFiles() {
       try {
-        const resp = await fetch('/admin/api/files');
+        const resp = await fetchWithRetry('/admin/api/files');
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         renderFileList(data.files || []);
