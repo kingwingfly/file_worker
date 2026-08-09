@@ -41,10 +41,9 @@ Edit `wrangler.toml` with your resource IDs:
 - `[vars].CF_ACCESS_TEAM_DOMAIN` — your Cloudflare Access team domain
 - `[vars].CF_ACCESS_AUD` — your Cloudflare Access application audience tag
 
-No R2 S3 API token is needed. Rename used to require one; migration 0002 made it
-a D1-only operation, so the `CLIENT_ID` / `CLIENT_SECRET` secrets-store bindings
-and the `CF_ACCOUNT_ID` / `R2_BUCKET_NAME` vars are gone. If you configured that
-token, revoke it — it granted far more than the R2 binding does.
+That is the whole configuration — no secrets store, and no R2 S3 API token. If
+you set one up for an earlier version of this worker, revoke it: nothing reads it
+any more, and it granted far more than the R2 binding does.
 
 ### 4. Apply D1 migrations
 
