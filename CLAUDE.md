@@ -155,8 +155,16 @@ Consequences that are easy to break:
   `overwrite`. `/upload/start`'s duplicate check can be days stale by the time
   a resumed session completes, and the overwrite branch below it deletes the
   colliding row's R2 object — on a stale decision that destroys a live file.
-- Only 0 (no response), 429 and 5xx are retried. 401/403 is an expired Access
-  cookie, which needs a reload, not backoff.
+- Only 0 (no response), 408, 425, 429 and 5xx are retried. 401/403 is an
+  expired Access cookie, which needs a reload, not backoff. **408 is the
+  common one**: Cloudflare drops a request whose body arrives too slowly, on
+  an undocumented edge timeout. It is transient and must stay in that set —
+  leaving it out turned every slow part into a manual Resume.
+- Part size comes from `chunkSizeFor()` and is bounded by the edge timeout,
+  not by R2. 8 MB needs roughly a third of the sustained upstream that 25 MB
+  did, and a part that does time out is cheaper to resend. Raising it back
+  trades 408s for fewer requests; don't, without measuring the upstream.
+  Sessions stored under an older size keep working — they carry their own.
 
 ## Frontend
 

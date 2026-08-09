@@ -663,7 +663,23 @@
     if (loadSession()) showResumeBanner(null);
 
     // Upload — multipart for large files
-    const CHUNK_SIZE = 25 * 1024 * 1024; // 25 MB per chunk
+    // Part size is bounded from both ends. R2 wants parts ≥5 MB (except the
+    // last) and at most 10,000 of them. Cloudflare separately drops a request
+    // whose body arrives too slowly — an undocumented edge timeout that
+    // surfaces as 408 — so the real ceiling is how much this connection can
+    // push before the edge stops waiting, not R2's maximum. 25 MB needed
+    // roughly 7 Mbps sustained to stay inside that window; 8 MB needs about a
+    // third of that, and a part that does time out is cheaper to resend.
+    const MIN_CHUNK_SIZE = 8 * 1024 * 1024;
+    const MAX_PARTS = 9000;              // R2 allows 10000; leave headroom
+    const PART_TIMEOUT_MS = 300000;      // a stalled socket should fail, not hang
+
+    // Only grows the part size for files big enough to blow the part count —
+    // 8 MB covers everything up to 72 GB.
+    function chunkSizeFor(fileSize) {
+      const needed = Math.ceil(fileSize / MAX_PARTS);
+      return Math.max(MIN_CHUNK_SIZE, Math.ceil(needed / (1024 * 1024)) * 1024 * 1024);
+    }
     const dupWarning = document.getElementById('dup-warning');
     const dupKeyEl = document.getElementById('dup-key');
     const btnOverwrite = document.getElementById('btn-overwrite');
@@ -790,7 +806,7 @@
           key: startData.key,       // server-minted; resume replays it, never re-mints
           path: startData.path,
           contentType: file.type || 'application/octet-stream',
-          chunkSize: CHUNK_SIZE,
+          chunkSize: chunkSizeFor(file.size),
           overwrite: !!overwrite,
           parts: [],
           file: { name: file.name, size: file.size, lastModified: file.lastModified },
@@ -847,7 +863,7 @@
       // result instead, waiting for it if it is still in flight.
       settleWakeHint();
 
-      // Always the session's chunk size, never CHUNK_SIZE. R2 requires every
+      // Always the session's chunk size, never chunkSizeFor(). R2 requires every
       // part but the last to be identically sized, so raising the constant
       // would silently corrupt any session started under the old one.
       const totalChunks = sessionChunks(session);
@@ -989,7 +1005,12 @@
     // attempts. An expired admin session lands here as 403 and needs a reload,
     // not patience — hence the distinct message below.
     function isRetryable(err) {
-      return err.status === 0 || err.status === 429 || (err.status >= 500 && err.status < 600);
+      const s = err.status;
+      // 408 is Cloudflare's edge giving up on a request body that arrived too
+      // slowly. It is the single most common failure on a large upload over a
+      // modest upstream, it is entirely transient, and leaving it out of this
+      // set is what turned every one of them into a manual Resume.
+      return s === 0 || s === 408 || s === 425 || s === 429 || (s >= 500 && s < 600);
     }
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -1116,6 +1137,10 @@
           n: partNumber,
         });
         xhr.open('PUT', `/admin/api/upload/part?${params}`);
+        // Without this a half-dead socket hangs the upload indefinitely. A
+        // timeout fires the `timeout` listener above with status 0, which is
+        // retryable — the same path a dropped connection takes.
+        xhr.timeout = PART_TIMEOUT_MS;
         xhr.send(blob);
       });
     }
