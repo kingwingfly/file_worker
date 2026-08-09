@@ -40,11 +40,11 @@ Edit `wrangler.toml` with your resource IDs:
 - `[[kv_namespaces]]` — your KV namespace id (for JWKS cache)
 - `[vars].CF_ACCESS_TEAM_DOMAIN` — your Cloudflare Access team domain
 - `[vars].CF_ACCESS_AUD` — your Cloudflare Access application audience tag
-- `[vars].CF_ACCOUNT_ID` — your account ID (R2 S3 endpoint host)
-- `[vars].R2_BUCKET_NAME` — must equal `[[r2_buckets]].bucket_name`
-- `[[secrets_store_secrets]]` — R2 S3 API token as `CLIENT_ID` (Access Key ID)
-  and `CLIENT_SECRET` (Secret Access Key), used only by the rename path.
-  Scope the token to Object Read & Write on this one bucket.
+
+No R2 S3 API token is needed. Rename used to require one; migration 0002 made it
+a D1-only operation, so the `CLIENT_ID` / `CLIENT_SECRET` secrets-store bindings
+and the `CF_ACCOUNT_ID` / `R2_BUCKET_NAME` vars are gone. If you configured that
+token, revoke it — it granted far more than the R2 binding does.
 
 ### 4. Apply D1 migrations
 
@@ -77,9 +77,20 @@ npx wrangler deploy
 | PUT | `/admin/api/upload/part?upload_id=&key=&n=` | Upload one chunk (raw bytes) |
 | POST | `/admin/api/upload/complete?upload_id=&key=` | Finish upload + D1 insert |
 | DELETE | `/admin/api/upload?upload_id=&key=` | Abort a multipart upload |
-| POST | `/admin/api/files/check-key` | Check whether a key would collide |
-| POST | `/admin/api/files/rename` | Rename (S3 CopyObject + D1 update + delete old) |
-| DELETE | `/admin/api/files/{key}` | Delete file from R2 + D1 |
+| POST | `/admin/api/files/check-key` | Check whether a display path would collide |
+| POST | `/admin/api/files/rename` | Rename — one D1 `UPDATE`, no R2 work |
+| DELETE | `/admin/api/files/{path}` | Delete file from R2 + D1 |
+
+### Two names per file
+
+`files.key` is the R2 object name. It is minted once at upload and never
+changes, so `/api/file/{key}` links stay valid forever — including across
+renames. `files.path` is the name the UI shows and the one duplicate detection
+uses; renaming edits only this column.
+
+The consequence is that after a rename the R2 dashboard still shows the original
+object name. That is the trade for renames that cost the same whether the file is
+4 KB or 40 GB.
 
 Non-GET calls to `/admin/api/*` require an `Origin` header matching the worker's
 own origin (CSRF defence — admin auth is a cookie). The admin page satisfies this

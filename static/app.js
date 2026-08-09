@@ -126,7 +126,7 @@ function createCard(file, index) {
     const img = document.createElement('img');
     img.className = 'card-thumb';
     img.src = `/api/file/${encodePath(file.key)}`;
-    img.alt = file.key;
+    img.alt = displayName(file);
     img.loading = 'lazy';
     img.onerror = () => { img.outerHTML = placeholderHTML('🖼️'); };
     img.onclick = () => openPreview(file);
@@ -153,8 +153,8 @@ function createCard(file, index) {
 
   const name = document.createElement('div');
   name.className = 'card-name';
-  name.textContent = file.key.split('/').pop() || file.key;
-  name.title = file.key;
+  name.textContent = displayName(file);
+  name.title = displayPath(file);
 
   const meta = document.createElement('div');
   meta.className = 'card-meta';
@@ -187,7 +187,7 @@ function openPreview(file) {
   state.previewOpen = true;
   state.currentPreview = file;
 
-  dom.modalFilename.textContent = file.key.split('/').pop() || file.key;
+  dom.modalFilename.textContent = displayName(file);
   dom.modalMedia.innerHTML = '';
 
   const ct = file.content_type || '';
@@ -196,7 +196,7 @@ function openPreview(file) {
   if (ct.startsWith('image/')) {
     const img = document.createElement('img');
     img.src = url;
-    img.alt = file.key;
+    img.alt = displayName(file);
     dom.modalMedia.appendChild(img);
   } else if (ct.startsWith('video/')) {
     const vid = document.createElement('video');
@@ -254,10 +254,13 @@ function closePreview() {
 
 // ── Download ──
 function downloadFile(file) {
-  const url = `/api/file/${encodePath(file.key)}?download=1`;
+  // The storage key is opaque, so the download name travels in the query string;
+  // the worker turns it into Content-Disposition.
+  const name = displayName(file);
+  const url = `/api/file/${encodePath(file.key)}?download=1&name=${encodeURIComponent(name)}`;
   const a = document.createElement('a');
   a.href = url;
-  a.download = file.key.split('/').pop() || file.key;
+  a.download = name;
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
@@ -312,6 +315,18 @@ function updateEmptyState() {
 // ── Utilities ──
 function encodePath(key) {
   return key.split('/').map(encodeURIComponent).join('/');
+}
+
+// A file has two names: `key` is the immutable R2 object (what URLs are built
+// from) and `path` is the display name a rename moves. Older rows have no
+// `path`, so fall back to `key`.
+function displayPath(file) {
+  return file.path || file.key;
+}
+
+function displayName(file) {
+  const path = displayPath(file);
+  return path.split('/').pop() || path;
 }
 
 function formatFileSize(bytes) {

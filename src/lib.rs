@@ -34,7 +34,18 @@ fn content_disposition(filename: &str) -> String {
 mod auth;
 mod cors;
 mod db;
-mod s3_copy;
+
+/// Mint the R2 object name for a new upload.
+///
+/// This is never shown to anyone and never changes: renaming edits `files.path`
+/// instead, so `/api/file/{key}` links survive it. The timestamp+random prefix
+/// makes it collision-free even when two uploads pick the same display path,
+/// and keeping the original filename on the end keeps the R2 dashboard readable.
+fn new_storage_key(filename: &str) -> String {
+    let ts = Date::now().as_millis();
+    let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+    format!("uploads/{}/{}-{:08x}/{}", ts / 86_400_000, ts, rand, filename)
+}
 
 /// URL-decode a percent-encoded key from the URL path.
 /// The URL parser preserves `%2F` (encoded `/`) in pathnames, so keys
@@ -239,16 +250,25 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
                     let mut headers = Headers::new();
                     headers.set("Content-Type", &content_type)?;
-                    // Keys are mutable (upload?overwrite=1, rename), so `immutable`
-                    // + 1 year would pin stale content in browser/edge caches.
-                    headers.set("Cache-Control", "public, max-age=3600")?;
+                    // Safe again since migration 0002: a key is minted once per
+                    // upload and never rewritten — rename moves `files.path`, and
+                    // ?overwrite=1 writes a fresh key and drops the old object.
+                    // The bytes behind a given key genuinely never change.
+                    headers.set("Cache-Control", "public, max-age=31536000, immutable")?;
                     // Content-Type is client-supplied at upload time; never let the
                     // browser sniff an uploaded blob into an active type.
                     headers.set("X-Content-Type-Options", "nosniff")?;
                     headers.set("Accept-Ranges", "bytes")?;
 
                     if is_download {
-                        let filename = key.rsplit('/').next().unwrap_or(&key);
+                        // The key is an opaque storage name since migration 0002, so
+                        // the display name has to come from the caller. Falling back
+                        // to the key still gives pre-0002 files their old filename.
+                        let filename = query_pairs
+                            .get("name")
+                            .map(|s| s.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| key.rsplit('/').next().unwrap_or(&key));
                         headers.set("Content-Disposition", &content_disposition(filename))?;
                     }
 
@@ -284,7 +304,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let custom_path = body["path"].as_str().filter(|s| !s.is_empty());
             let overwrite = body["overwrite"].as_bool().unwrap_or(false);
 
-            let key = if let Some(path) = custom_path {
+            // The display path the file will be listed under…
+            let path = if let Some(path) = custom_path {
                 if path.ends_with('/') {
                     format!("{}{}", path, filename)
                 } else {
@@ -296,17 +317,20 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             };
 
             // Check for duplicate unless overwrite flag is set
-            if !overwrite && db::check_file_exists(&ctx, &key).await? {
+            if !overwrite && db::path_exists(&ctx, &path).await? {
                 return Ok(
                     Response::from_json(&serde_json::json!({
                         "error": "duplicate",
-                        "key": key,
-                        "message": "A file with this key already exists.",
+                        "path": path,
+                        "message": "A file with this name already exists.",
                     }))?
                     .with_status(409)
                     .with_headers(cors::headers()?),
                 );
             }
+
+            // …and the R2 object name, which is independent of it.
+            let key = new_storage_key(filename);
 
             let bucket = ctx.bucket("FILE_BUCKET")?;
             let metadata = HttpMetadata {
@@ -323,6 +347,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             Ok(Response::from_json(&serde_json::json!({
                 "upload_id": upload_id,
                 "key": key,
+                "path": path,
             }))?
             .with_headers(cors::headers()?))
         })
@@ -380,6 +405,9 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 .ok_or_else(|| worker::Error::RustError("missing parts array".into()))?;
             let content_type =
                 sanitize_content_type(body["content_type"].as_str().unwrap_or_default());
+            // Display path chosen at /upload/start. Falls back to the storage key
+            // so a client that predates this field still produces a usable row.
+            let path = body["path"].as_str().filter(|s| !s.is_empty()).unwrap_or(&key).to_string();
 
             let uploaded_parts: Vec<UploadedPart> = parts_json
                 .iter()
@@ -396,13 +424,26 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let obj = upload.complete(uploaded_parts).await?;
             let size = obj.size() as i64;
 
+            // Overwrite: the row keeping this path points at a *different* R2
+            // object now that keys are generated per upload, so drop that object
+            // explicitly. INSERT OR REPLACE can no longer do this for us — it
+            // would leave the old bytes in the bucket with nothing referencing them.
+            if let Some(previous) = db::get_by_path(&ctx, &path).await? {
+                if previous.key != key {
+                    let _ = bucket.delete(&previous.key).await;
+                }
+                db::delete_by_path(&ctx, &path).await?;
+                console_log!("Overwrote {} (dropped old object {})", path, previous.key);
+            }
+
             // Insert record into D1. If this fails, clean up the R2 object.
-            match db::insert_file(&ctx, &key, size, &content_type).await {
+            match db::insert_file(&ctx, &key, &path, size, &content_type).await {
                 Ok(()) => {
-                    console_log!("Upload complete: key={}, size={}", key, size);
+                    console_log!("Upload complete: path={}, key={}, size={}", path, key, size);
                     Ok(Response::from_json(&serde_json::json!({
                         "ok": true,
                         "key": key,
+                        "path": path,
                         "size": size,
                     }))?
                     .with_headers(cors::headers()?))
@@ -442,60 +483,81 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             Ok(Response::from_json(&serde_json::json!({"ok": true}))?
                 .with_headers(cors::headers()?))
         })
-        // DELETE /admin/api/files/*key — delete file from R2 + D1 (wildcard matches keys with /)
-        .delete_async("/admin/api/files/*key", |req, ctx| async move {
+        // DELETE /admin/api/files/*path — delete file from R2 + D1 (wildcard matches paths with /)
+        .delete_async("/admin/api/files/*path", |req, ctx| async move {
             // Verify Cloudflare Access JWT
             let claims = auth::verify_access_jwt(&req, &ctx).await?;
             console_log!("Delete by: {:?}", claims.email);
 
-            let raw = ctx.param("key").map_or("", |v| v);
-            let key = decode_key(raw);
+            let raw = ctx.param("path").map_or("", |v| v);
+            let path = decode_key(raw);
 
-            if key.is_empty() {
-                return Ok(Response::error("Bad Request: missing key", 400)?
+            if path.is_empty() {
+                return Ok(Response::error("Bad Request: missing path", 400)?
                     .with_headers(cors::headers()?));
             }
+
+            // The UI names files by display path; D1 holds the R2 object name.
+            let record = match db::get_by_path(&ctx, &path).await? {
+                Some(record) => record,
+                None => {
+                    return Ok(Response::from_json(&serde_json::json!({
+                        "error": "not_found",
+                        "message": "文件不存在。",
+                    }))?
+                    .with_status(404)
+                    .with_headers(cors::headers()?))
+                }
+            };
 
             // Delete from R2 first, then D1.
             // If R2 fails, D1 row remains visible → retryable from UI.
             // If D1 fails after R2 success, the object is already gone
             // but retry works (R2 delete is idempotent, D1 delete is a no-op).
             let bucket = ctx.bucket("FILE_BUCKET")?;
-            bucket.delete(&key).await?;
-            let deleted_key = key.clone();
-            db::delete_file(&ctx, &key).await?;
+            bucket.delete(&record.key).await?;
+            db::delete_by_path(&ctx, &path).await?;
 
-            Ok(Response::from_json(&serde_json::json!({"ok": true, "deleted": deleted_key}))?
+            Ok(Response::from_json(&serde_json::json!({"ok": true, "deleted": path}))?
                 .with_headers(cors::headers()?))
         })
-        // POST /admin/api/files/rename — rename a file (R2 copy + delete + D1 update)
+        // POST /admin/api/files/rename — rename a file (pure D1 metadata update)
+        //
+        // The R2 object is never touched: `files.key` is the immutable storage
+        // name and only `files.path` moves. That makes rename constant-time for a
+        // 4 KB thumbnail and a 40 GB video alike, and it leaves every existing
+        // /api/file/{key} link working.
         .post_async("/admin/api/files/rename", |mut req, ctx| async move {
             let claims = auth::verify_access_jwt(&req, &ctx).await?;
             console_log!("Rename by: {:?}", claims.email);
 
             let body: serde_json::Value = req.json().await?;
-            let old_key = body["old_key"]
-                .as_str()
-                .ok_or_else(|| worker::Error::RustError("missing old_key".into()))?;
-            let new_key = body["new_key"]
-                .as_str()
-                .ok_or_else(|| worker::Error::RustError("missing new_key".into()))?;
+            // `old_key`/`new_key` are the pre-0002 field names, still accepted so
+            // a cached copy of the admin page keeps working after deploy.
+            let field = |new: &str, legacy: &str| -> String {
+                body[new]
+                    .as_str()
+                    .or_else(|| body[legacy].as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let old_path = field("old_path", "old_key");
+            let new_path = field("new_path", "new_key");
 
-            if old_key.is_empty() || new_key.is_empty() {
-                return Ok(Response::error("Bad Request: empty key", 400)?
+            if old_path.is_empty() || new_path.is_empty() {
+                return Ok(Response::error("Bad Request: empty path", 400)?
                     .with_headers(cors::headers()?));
             }
 
-            if old_key == new_key {
+            if old_path == new_path {
                 return Ok(Response::from_json(&serde_json::json!({
                     "ok": true,
-                    "key": new_key,
+                    "path": new_path,
                 }))?
                 .with_headers(cors::headers()?));
             }
 
-            // Check target key doesn't already exist
-            if db::check_file_exists(&ctx, new_key).await? {
+            if db::path_exists(&ctx, &new_path).await? {
                 return Ok(Response::from_json(&serde_json::json!({
                     "error": "duplicate",
                     "message": "目标文件名已存在。",
@@ -504,45 +566,24 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 .with_headers(cors::headers()?));
             }
 
-            let bucket = ctx.bucket("FILE_BUCKET")?;
-
-            // The D1 check above misses an R2 object with no matching row (an
-            // orphan from a failed insert). CopyObject overwrites unconditionally,
-            // so without this the rename would destroy that object's bytes — and
-            // the rollback below would then delete what was left.
-            if bucket.head(new_key).await?.is_some() {
+            if !db::rename_path(&ctx, &old_path, &new_path).await? {
                 return Ok(Response::from_json(&serde_json::json!({
-                    "error": "duplicate",
-                    "message": "目标文件名已存在。",
+                    "error": "not_found",
+                    "message": "文件不存在。",
                 }))?
-                .with_status(409)
+                .with_status(404)
                 .with_headers(cors::headers()?));
             }
 
-            // Order matters: copy → D1 → delete old.
-            // If D1 fails we still have both objects and the row points at a
-            // live key, so the user can retry. Deleting first would leave D1
-            // pointing at an object that no longer exists.
-            s3_copy::s3_copy(&ctx, old_key, new_key).await?;
-
-            if let Err(e) = db::rename_file(&ctx, old_key, new_key).await {
-                // Roll back the copy so the new key doesn't become an orphan.
-                let _ = bucket.delete(new_key).await;
-                return Err(e);
-            }
-
-            // D1 now points at new_key — safe to drop the old object.
-            bucket.delete(old_key).await?;
-
-            console_log!("Renamed: {} -> {}", old_key, new_key);
+            console_log!("Renamed: {} -> {}", old_path, new_path);
             Ok(Response::from_json(&serde_json::json!({
                 "ok": true,
-                "old_key": old_key,
-                "new_key": new_key,
+                "old_path": old_path,
+                "new_path": new_path,
             }))?
             .with_headers(cors::headers()?))
         })
-        // POST /admin/api/files/check-key — check if a key would collide before upload
+        // POST /admin/api/files/check-key — check if a display path would collide
         .post_async("/admin/api/files/check-key", |mut req, ctx| async move {
             let _claims = auth::verify_access_jwt(&req, &ctx).await?;
 
@@ -550,7 +591,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let filename = body["filename"].as_str().unwrap_or("unnamed");
             let custom_path = body["path"].as_str().filter(|s| !s.is_empty());
 
-            let key = if let Some(path) = custom_path {
+            // Must mirror the path logic in /upload/start exactly.
+            let path = if let Some(path) = custom_path {
                 if path.ends_with('/') {
                     format!("{}{}", path, filename)
                 } else {
@@ -561,9 +603,9 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 format!("uploads/{}/{}", ts / 86400000, filename)
             };
 
-            let exists = db::check_file_exists(&ctx, &key).await?;
+            let exists = db::path_exists(&ctx, &path).await?;
             Ok(Response::from_json(&serde_json::json!({
-                "key": key,
+                "path": path,
                 "exists": exists,
             }))?
             .with_headers(cors::headers()?))

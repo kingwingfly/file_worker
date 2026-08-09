@@ -18,18 +18,6 @@ database_id = "<database_id>"
 binding = "JWKS_CACHE"
 id = "<id>"
 
-# R2 S3-API credentials, used for server-side CopyObject on rename.
-# The binding names below are referenced verbatim by src/s3_copy.rs.
-[[secrets_store_secrets]]
-binding = "CLIENT_ID"
-store_id = "<store_id>"
-secret_name = "<access_key_id_secret_name>"
-
-[[secrets_store_secrets]]
-binding = "CLIENT_SECRET"
-store_id = "<store_id>"
-secret_name = "<secret_access_key_secret_name>"
-
 [assets]
 directory = "./static"
 binding = "ASSETS"
@@ -39,7 +27,3 @@ run_worker_first = ["/api/*", "/admin/api/*"]
 # Cloudflare Access configuration — set these before deploy
 CF_ACCESS_TEAM_DOMAIN = "<name>.cloudflareaccess.com"
 CF_ACCESS_AUD = "<CF_ACCESS_AUD>"
-# R2 S3 API account ID — find this in your Cloudflare Dashboard URL or wrangler whoami
-CF_ACCOUNT_ID = "<account_id>"
-# Must match [[r2_buckets]].bucket_name above — used by the S3 CopyObject rename path
-R2_BUCKET_NAME = "<bucket_name>"

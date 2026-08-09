@@ -1,8 +1,7 @@
 # CLAUDE.md — file_worker (zcll-worker)
 
 Rust Cloudflare Worker (`worker-rs` 0.8) serving a media gallery from R2 + D1.
-`src/lib.rs` routes, `src/auth.rs` Access JWT, `src/db.rs` D1, `src/s3_copy.rs`
-R2 S3-API CopyObject, `static/` frontend.
+`src/lib.rs` routes, `src/auth.rs` Access JWT, `src/db.rs` D1, `static/` frontend.
 
 ## Build / check
 
@@ -13,64 +12,62 @@ npx wrangler tail                              # the only way to see runtime err
 ```
 
 There are no tests. `cargo check` passing says nothing about runtime behaviour —
-most bugs in this project are JS-interop or S3-signature bugs that only appear in
-`wrangler tail`.
+most bugs in this project are JS-interop bugs that only appear in `wrangler tail`.
 
 ## Hard-won constraints — do not re-break these
 
-### Secrets Store bindings are not string secrets
+### Renaming is a D1 update, never an R2 copy
 
-`[[secrets_store_secrets]]` bindings (`CLIENT_ID`, `CLIENT_SECRET`) are
-Fetcher-shaped objects with an async `get()`. `env.secret(name)` casts to
-`String` and returns `Err("Binding cannot be cast to the type String from
-Fetcher")` on **every** call. Always use:
+`files.key` is the R2 object name and is immutable — minted by `new_storage_key()`
+at upload and never rewritten. `files.path` is the mutable display name. Rename
+(`db::rename_path`) touches only `path`, so it is O(1) for a 40 GB video and every
+existing `/api/file/{key}` link keeps working. Migration 0002 introduced this.
 
-```rust
-ctx.env.secret_store("BINDING")?.get().await?   // -> Result<Option<String>>
-```
+Do not "simplify" this back into a key rewrite. The Workers R2 binding has **no**
+`copy` (`R2Bucket` is head/get/put/delete/delete_multiple/list/
+create_multipart_upload/resume_multipart_upload only), so a key rewrite means one
+of two bad options, both of which this project has already tried and abandoned:
 
-`env.secret()` is only for `wrangler secret put` plaintext secrets.
-`env.var()` is only for `[vars]`.
+- `bucket.get(old).bytes()` → `bucket.put(new, …)`: buffers the file in the
+  Worker's 128 MB heap. OOMs on any real video.
+- S3 `CopyObject` against `<account_id>.r2.cloudflarestorage.com`: server-side but
+  still moves every byte (~15 MB/s measured — a 300 MB rename took 20 s and larger
+  files failed), and it needs an R2 S3 API token, a much broader credential than
+  the R2 binding. Deleted in favour of the `path` column; do not reintroduce it.
 
-### R2 has no server-side copy in the Workers binding
+`ObjectBody::stream()` pumps every byte through WASM (CPU-billed) and worker-rs
+0.8.5 gives no way to hand the raw `ReadableStream` back to `bucket.put`, so there
+is no cheap streaming middle ground either.
 
-`R2Bucket` (and therefore `worker::Bucket`) exposes only head/get/put/delete/
-delete_multiple/list/create_multipart_upload/resume_multipart_upload. There is
-**no** `copy`. Renaming requires either:
+### Consequences of the two-name model
 
-- `bucket.get(old).bytes()` → `bucket.put(new, bytes)` — buffers the whole file
-  in the Worker's 128 MB heap. OOMs on any real video. This is what the code did
-  before; do not go back to it.
-- S3 `CopyObject` against `<account_id>.r2.cloudflarestorage.com` — server-side,
-  zero bytes through the Worker. This is what `src/s3_copy.rs` does.
+Anything the user names is a **path**; anything R2 is asked about is a **key**.
+Mixing them up is the easy bug here.
 
-`ObjectBody::stream()` exists but pumps every byte through WASM (CPU-billed) and
-worker-rs 0.8.5 gives no way to hand the raw `ReadableStream` back to
-`bucket.put`, so there is no cheap streaming middle ground.
-
-### SigV4 canonicalisation (src/s3_copy.rs)
-
-The signature only matches if the signed strings are byte-identical to what is
-sent. Three things that silently produce `403 SignatureDoesNotMatch`:
-
-1. Canonical URI must be the **full request path** `/{bucket}/{encoded_key}` —
-   with the leading slash and the bucket, not just the key.
-2. Percent-encoding must leave the unreserved set `A-Za-z0-9-._~` alone.
-   `percent_encoding::NON_ALPHANUMERIC` encodes `-._~` and is wrong here; use the
-   `AWS_UNRESERVED` set defined in the module.
-3. `x-amz-copy-source` must be percent-encoded and the canonical-headers block
-   must carry the identical value. Build each string once and reuse it.
-
-Region is `auto`, service is `s3`, payload hash is SHA-256("") for a body-less PUT.
-`hmac_sha256`'s `key.len() > 64` branch is live — R2 secret keys are 64 hex chars,
-so `"AWS4" + secret` is 68 bytes. Don't delete it as dead code.
+- Admin routes (`DELETE /admin/api/files/*path`, rename, check-key) take paths and
+  resolve to a key via `db::get_by_path` before touching the bucket.
+- `/api/file/*key` takes the storage key and does **no** D1 read — that keeps the
+  Range path (dozens of requests per video playback) at zero extra latency.
+- Because the key is opaque, `?download=1` cannot derive a filename from it. The
+  frontend passes `&name=`; the fallback to the key only helps pre-0002 rows.
+- `INSERT OR REPLACE` no longer implements `?overwrite=1`: keys are fresh per
+  upload, so the replace would never fire and the old object would leak. The
+  complete handler explicitly deletes the previous row's object.
+- `SELECT` lists use `COALESCE(path, key)` as a default, but every `WHERE` filters
+  on bare `path` — `COALESCE(...) = ?` is an expression `idx_files_path` cannot
+  serve, so it would full-scan on the upload hot path. Migration 0002 backfills
+  `path` for all rows, which is what makes the bare column safe.
+- Key immutability is convention, not enforcement: `/upload/part` and
+  `/upload/complete` take `key` from the client's query string, so an admin client
+  that reused an existing key would rewrite bytes an `immutable` cache is holding
+  for a year. Never let the client pick the key at `/upload/start`.
 
 ### Header values are ByteStrings
 
 `Headers::set` with any code point above U+00FF throws. Filenames here are
 routinely Chinese, so never interpolate a key/filename into a header raw. Use
 `content_disposition()` in `lib.rs` (RFC 5987 `filename*=UTF-8''…` plus an
-ASCII-sanitised fallback). Same reason `x-amz-copy-source` is percent-encoded.
+ASCII-sanitised fallback).
 
 ### Key encoding across the wire
 
@@ -93,15 +90,20 @@ so `sanitize_content_type()` in `lib.rs` clamps uploads to `image|video|audio`
 `application/octet-stream`. `X-Content-Type-Options: nosniff` does *not* cover
 this — it only stops sniffing away from a declared type. Keep both.
 
-`Cache-Control` on that route is `public, max-age=3600`, deliberately not
-`immutable` + 1 year: `?overwrite=1` and rename both reuse keys. Raise the
-max-age if you want more edge caching; do not re-add `immutable`.
+`Cache-Control` on that route is `public, max-age=31536000, immutable`. That is
+only correct because keys are content-stable: rename moves `files.path`, and
+`?overwrite=1` mints a fresh key rather than rewriting one. If you ever make a
+key's bytes mutable again, this header must come down with it or clients will pin
+stale content for a year.
 
 ### Multi-step mutations need an order
 
-R2 and D1 are not transactional together. Rename is copy → D1 update → delete
-old, with a best-effort delete of the new key if D1 fails. Never delete the old
-object before D1 points at the new one.
+R2 and D1 are not transactional together, so every route that touches both has a
+deliberate order. Upload commits the object, then inserts the row, and deletes the
+object if the insert fails. Delete removes the object first, then the row, so a
+half-failure leaves a retryable row rather than a phantom listing. Rename no
+longer touches R2 at all, which is the main reason the whole class of problem
+mostly went away.
 
 ## Frontend
 
@@ -116,8 +118,9 @@ entities (`&#39;`) escape out of that regardless of quote-escaping.
 - An unknown `kid` forces a JWKS reload (external fetch + KV write) on every
   request, so an unauthenticated caller can amplify subrequests.
 - `/admin/api/files` fetches 1000 rows unpaginated.
-- The rename rollback deletes `new_key` when the D1 update fails. The
-  `bucket.head(new_key)` guard makes this safe in the normal case, but a
-  concurrent rename landing between that head and our CopyObject can still make
-  the rollback delete an object another row legitimately owns. Narrow; noted
-  rather than restructured with a lock.
+- Duplicate detection is a `SELECT` followed by an `UPDATE`/`INSERT`, not atomic.
+  The `idx_files_path` UNIQUE index is the real backstop; a losing racer sees a
+  D1 constraint error rather than a friendly 409.
+- An overwrite upload deletes the previous R2 object before inserting the new
+  row. If that insert then fails, both the old bytes and the new row are gone.
+  Narrow (the object is committed first), noted rather than restructured.
