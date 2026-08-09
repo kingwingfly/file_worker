@@ -142,10 +142,21 @@ request: two overlapping `request('screen')` calls orphan the first sentinel,
 which then keeps the screen awake forever with nothing holding a reference to
 release it.
 
+Acquisition is anchored to the click handlers, not to `doMultipartUpload` —
+that runs after the check-key round trip, past any transient activation. The
+duplicate-name dialog releases the lock while it waits for an answer and the
+overwrite button re-takes it on its own gesture; `wakeLockWanted` covers the
+case where a release lands while a request is still in flight, which would
+otherwise leak a sentinel nothing holds a reference to.
+
 A `beforeunload` handler guards the same window, because the multipart abort
 lives in `doMultipartUpload`'s `catch` and never runs if the page is gone. Every
 browser ignores a custom message there and shows its own dialog — cancelling the
-event is the entire API surface, so don't add wording to it.
+event is the entire API surface, so don't add wording to it. Firefox needs the
+`preventDefault()`, Chrome and Safari need the `returnValue`; both are set on
+purpose. iOS Safari frequently shows no dialog at all, and there is no fix —
+on mobile the upload usually dies from backgrounding before a tab close is even
+the question.
 
 Object keys are user-controlled: build list rows with DOM APIs and
 `addEventListener`, never `innerHTML` with `onclick="fn('${key}')"` — HTML

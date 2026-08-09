@@ -432,12 +432,20 @@
     // visible, and does not re-take it when the page comes back. The
     // visibilitychange handler below is therefore load-bearing, not a nicety:
     // without it, one tab switch during a long upload silently ends the lock.
+    //
+    // Acquisition is anchored to the click that starts an upload, never to the
+    // async work that follows it. Every engine documents the gesture-time
+    // pattern, and WebKit is the one that appears to enforce it: a request
+    // issued after the check-key round trip has outlived its transient
+    // activation. Failure is not fatal — the hint says so and the upload runs.
     const wakeHint = document.getElementById('wake-hint');
     let wakeLock = null;
     let wakeLockPending = null;
+    let wakeLockWanted = false;
     let uploadInProgress = false;
 
     async function acquireWakeLock(site) {
+      wakeLockWanted = true;
       if (!('wakeLock' in navigator)) return false;
       // Two callers (upload start, visibilitychange) can race here. Without
       // this guard both requests resolve, the second overwrites `wakeLock`,
@@ -452,6 +460,13 @@
         wakeLockPending = navigator.wakeLock.request('screen');
         wakeLock = await wakeLockPending;
         wakeLock.addEventListener('release', () => { wakeLock = null; });
+        // releaseWakeLock() may have run while the request was in flight — the
+        // admin cancelled the overwrite dialog, say. It had no sentinel to
+        // release then, so honour the intent now instead of leaking this one.
+        if (!wakeLockWanted) {
+          releaseWakeLock();
+          return false;
+        }
         return true;
       } catch (err) {
         // Safari denies with a bare NotAllowedError for several unrelated
@@ -476,6 +491,7 @@
     }
 
     function releaseWakeLock() {
+      wakeLockWanted = false;
       if (!wakeLock) return;
       wakeLock.release().catch(() => { /* already gone */ });
       wakeLock = null;
@@ -488,7 +504,7 @@
       } else if (held) {
         msg = '☕ 已阻止设备休眠';
       } else {
-        msg = '⚠️ 无法阻止休眠（可能开启了省电模式），请勿让设备休眠';
+        msg = '⚠️ 浏览器拒绝阻止休眠，请勿让设备休眠';
       }
       wakeHint.textContent = msg + ' · 请勿关闭此页面';
       wakeHint.hidden = false;
@@ -524,12 +540,18 @@
 
     uploadBtn.addEventListener('click', () => {
       if (!selectedFile) return;
+      // Ask for the lock here, synchronously in the gesture, not later in
+      // doMultipartUpload — that runs after the check-key round trip, by which
+      // point any transient activation has expired. MDN's examples acquire from
+      // a click for exactly this reason, on every engine.
+      acquireWakeLock('click');
       checkDuplicateThenUpload(selectedFile, customPath.value.trim());
     });
 
     btnOverwrite.addEventListener('click', () => {
       dupWarning.hidden = true;
       if (pendingOverwriteFile) {
+        acquireWakeLock('click'); // fresh gesture; the check-key pause released it
         doMultipartUpload(pendingOverwriteFile, pendingOverwritePath, true);
         pendingOverwriteFile = null;
         pendingOverwritePath = null;
@@ -540,6 +562,7 @@
       dupWarning.hidden = true;
       pendingOverwriteFile = null;
       pendingOverwritePath = null;
+      releaseWakeLock();
       uploadBtn.disabled = false;
       uploadBtn.textContent = '🚀 上传';
     });
@@ -567,6 +590,13 @@
         const checkData = await checkResp.json();
 
         if (checkData.exists) {
+          // No upload is starting — hand the lock back rather than holding the
+          // screen awake while the dialog waits for a decision. If the admin
+          // abandons the dialog instead of answering, the browser releases the
+          // lock itself the moment the tab is hidden, so the worst case is
+          // bounded. The other exits from this function (check failed, or it
+          // threw) fall through to doMultipartUpload and keep the lock.
+          releaseWakeLock();
           dupKeyEl.textContent = checkData.path;
           dupWarning.hidden = false;
           pendingOverwriteFile = file;
