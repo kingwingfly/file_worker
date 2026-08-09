@@ -129,6 +129,35 @@ Deliberately not implemented: parsing the MP4 `stsd` box (via a Range fetch) to
 name the file's actual codec. It ends at the same download button, and needs a
 moov-at-tail fallback for files without `+faststart`.
 
+### Resumable uploads live in the client, because they have to
+
+worker-rs 0.8.5's `MultipartUpload` is `upload_part` / `abort` / `complete` and
+nothing else — **there is no `list_parts`**. The server therefore cannot tell a
+returning client which parts already landed, so the part etags are persisted in
+`localStorage` under `zcll.upload.session` and replayed at `/upload/complete`.
+Do not "move this to the server"; there is no API to move it to.
+
+Consequences that are easy to break:
+
+- A failed part no longer aborts the multipart upload. That abort is what used
+  to discard hours of transfer. The open upload is the resume point; `Discard`
+  and an R2 lifecycle rule (see README) are what stop them accumulating.
+- The session stores `chunkSize` and every read uses it, never `CHUNK_SIZE`.
+  R2 requires all parts but the last to be identically sized, so changing the
+  constant would corrupt any session started under the old value.
+- Resume replays the stored server-minted `key`. It never calls `/upload/start`
+  again — that would mint a second key and orphan everything already sent —
+  which keeps "never let the client pick the key" true.
+- Resume is gated on name + size + lastModified matching. A mismatched file
+  would splice foreign bytes into the object and every part would still have a
+  valid etag, so nothing downstream would notice.
+- `/upload/complete` re-checks the path and 409s unless the session carried
+  `overwrite`. `/upload/start`'s duplicate check can be days stale by the time
+  a resumed session completes, and the overwrite branch below it deletes the
+  colliding row's R2 object — on a stale decision that destroys a live file.
+- Only 0 (no response), 429 and 5xx are retried. 401/403 is an expired Access
+  cookie, which needs a reload, not backoff.
+
 ## Frontend
 
 `static/admin.html` and `static/app.js` are plain inline JS, no build step.

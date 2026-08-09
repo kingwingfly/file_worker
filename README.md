@@ -74,7 +74,7 @@ npx wrangler deploy
 | GET | `/admin/api/files` | List all files |
 | POST | `/admin/api/upload/start` | Begin a multipart upload → `{upload_id, key}` |
 | PUT | `/admin/api/upload/part?upload_id=&key=&n=` | Upload one chunk (raw bytes) |
-| POST | `/admin/api/upload/complete?upload_id=&key=` | Finish upload + D1 insert |
+| POST | `/admin/api/upload/complete?upload_id=&key=` | Finish upload + D1 insert (409s if the name was taken while paused) |
 | DELETE | `/admin/api/upload?upload_id=&key=` | Abort a multipart upload |
 | POST | `/admin/api/files/check-key` | Check whether a display path would collide |
 | POST | `/admin/api/files/rename` | Rename — one D1 `UPDATE`, no R2 work |
@@ -90,6 +90,24 @@ uses; renaming edits only this column.
 The consequence is that after a rename the R2 dashboard still shows the original
 object name. That is the trade for renames that cost the same whether the file is
 4 KB or 40 GB.
+
+### Resumable uploads
+
+A dropped part is retried in place (4 attempts, 1s/2s/4s backoff). If it still
+fails, the multipart upload is **left open** rather than aborted, and the part
+etags stay in `localStorage` — so a 40 GB transfer that dies at 90% resumes from
+90% instead of from zero. The admin page shows a banner offering *继续上传* or
+*放弃并清理*.
+
+A resume after a page reload needs the same file re-selected from disk: a `File`
+handle cannot be persisted, and resuming with a different file would splice
+foreign bytes into the object. Name, size and last-modified must all match.
+
+**Set an R2 lifecycle rule to abort incomplete multipart uploads** (7 days is
+reasonable) in the bucket's dashboard settings. *放弃并清理* aborts the one
+session it knows about, but an admin who never returns leaves parts that are
+billed as storage with nothing referencing them. The rule is the only backstop
+that covers that case.
 
 Non-GET calls to `/admin/api/*` require an `Origin` header matching the worker's
 own origin (CSRF defence — admin auth is a cookie). The admin page satisfies this

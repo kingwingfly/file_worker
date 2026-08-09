@@ -408,6 +408,25 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             // Display path chosen at /upload/start. Falls back to the storage key
             // so a client that predates this field still produces a usable row.
             let path = body["path"].as_str().filter(|s| !s.is_empty()).unwrap_or(&key).to_string();
+            let overwrite = body["overwrite"].as_bool().unwrap_or(false);
+
+            // /upload/start ran a duplicate check, but a resumable session can be
+            // completed hours or days later — by which time another upload may own
+            // this path. Without this re-check the overwrite branch below would
+            // delete that newer file's object and row on the strength of a stale
+            // decision. Re-validate against the state that exists *now*.
+            let previous = db::get_by_path(&ctx, &path).await?;
+            if let Some(prev) = &previous {
+                if prev.key != key && !overwrite {
+                    return Ok(Response::from_json(&serde_json::json!({
+                        "error": "duplicate",
+                        "path": path,
+                        "message": "Another file took this name while the upload was paused.",
+                    }))?
+                    .with_status(409)
+                    .with_headers(cors::headers()?));
+                }
+            }
 
             let uploaded_parts: Vec<UploadedPart> = parts_json
                 .iter()
@@ -428,7 +447,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             // object now that keys are generated per upload, so drop that object
             // explicitly. INSERT OR REPLACE can no longer do this for us — it
             // would leave the old bytes in the bucket with nothing referencing them.
-            if let Some(previous) = db::get_by_path(&ctx, &path).await? {
+            if let Some(previous) = previous {
                 if previous.key != key {
                     let _ = bucket.delete(&previous.key).await;
                 }

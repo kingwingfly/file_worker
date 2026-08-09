@@ -357,6 +357,14 @@
         </div>
       </div>
 
+      <div class="duplicate-warning" id="resume-banner" hidden>
+        <div id="resume-text"></div>
+        <div style="margin-top:0.5rem;display:flex;gap:0.5rem;">
+          <button class="btn-rename-confirm" id="btn-resume" style="font-size:0.85rem;padding:0.4rem 1rem;">继续上传</button>
+          <button class="btn-rename-cancel" id="btn-discard" style="font-size:0.85rem;padding:0.4rem 1rem;">放弃并清理</button>
+        </div>
+      </div>
+
       <div id="progress-wrapper" hidden>
         <div class="upload-progress">
           <div class="upload-progress-bar" id="progress-bar" style="width:0%"></div>
@@ -398,15 +406,21 @@
     let selectedFile = null;
 
     // File selection
-    fileInput.addEventListener('change', () => {
-      selectedFile = fileInput.files[0];
-      uploadBtn.disabled = !selectedFile;
-      if (selectedFile) {
-        document.querySelector('.upload-zone-text').textContent = selectedFile.name;
-        document.querySelector('.upload-zone-hint').textContent =
-          formatSize(selectedFile.size) + ' — ' + (selectedFile.type || 'unknown');
-      }
-    });
+    function onFileChosen(file) {
+      if (!file) return;
+      selectedFile = file;
+      uploadBtn.disabled = false;
+      document.querySelector('.upload-zone-text').textContent = file.name;
+      document.querySelector('.upload-zone-hint').textContent =
+        formatSize(file.size) + ' — ' + (file.type || 'unknown');
+      // A File handle cannot survive a page reload, so a session restored from
+      // localStorage has no bytes to send until the admin picks the same file
+      // again. This is where that reconnection happens.
+      const session = loadSession();
+      if (session && sessionMatches(session, file)) showResumeBanner(file);
+    }
+
+    fileInput.addEventListener('change', () => onFileChosen(fileInput.files[0]));
 
     // Drag & drop
     uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
@@ -416,12 +430,8 @@
       uploadZone.classList.remove('drag-over');
       const file = e.dataTransfer.files[0];
       if (file) {
-        selectedFile = file;
         fileInput.files = e.dataTransfer.files;
-        uploadBtn.disabled = false;
-        document.querySelector('.upload-zone-text').textContent = file.name;
-        document.querySelector('.upload-zone-hint').textContent =
-          formatSize(file.size) + ' — ' + (file.type || 'unknown');
+        onFileChosen(file);
       }
     });
 
@@ -540,6 +550,98 @@
       e.returnValue = ''; // legacy Chrome/Safari spelling, still needed
     });
 
+    // ---- Resumable upload sessions -------------------------------------
+    //
+    // worker-rs 0.8.5's MultipartUpload exposes only upload_part / abort /
+    // complete — there is no list_parts — so the server cannot tell a returning
+    // client which parts already landed. The client is the only place that can
+    // remember them, which is why the etags live in localStorage.
+    //
+    // Written after *every* successful part, not on failure: the usual way an
+    // upload dies is a closed tab, a crash, or a sleeping machine, and none of
+    // those reach a catch block.
+    const SESSION_KEY = 'zcll.upload.session';
+    const PART_RETRIES = 4;
+    let resumeFile = null; // in-memory File matching the stored session, if any
+
+    const resumeBanner = document.getElementById('resume-banner');
+    const resumeText = document.getElementById('resume-text');
+    const btnResume = document.getElementById('btn-resume');
+    const btnDiscard = document.getElementById('btn-discard');
+
+    function saveSession(s) {
+      try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (_) { /* private mode / quota */ }
+    }
+    function loadSession() {
+      try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (_) { return null; }
+    }
+    function clearSession() {
+      try { localStorage.removeItem(SESSION_KEY); } catch (_) { /* nothing to do */ }
+    }
+
+    // Resuming with the wrong file would splice foreign bytes into the object,
+    // and nothing downstream would catch it — the parts all have valid etags.
+    // Match on all three cheap identity signals the File API gives us.
+    function sessionMatches(s, file) {
+      return !!s && !!s.file
+        && s.file.name === file.name
+        && s.file.size === file.size
+        && s.file.lastModified === file.lastModified;
+    }
+
+    function sessionChunks(s) {
+      return Math.max(1, Math.ceil(s.file.size / s.chunkSize));
+    }
+
+    async function abortSession(s) {
+      if (!s || !s.upload_id || !s.key) return;
+      try {
+        await fetch(
+          `/admin/api/upload?upload_id=${encodeURIComponent(s.upload_id)}&key=${encodePath(s.key)}`,
+          { method: 'DELETE' }
+        );
+      } catch (_) { /* best effort — an R2 lifecycle rule is the real backstop */ }
+    }
+
+    function showResumeBanner(file) {
+      const s = loadSession();
+      if (!s) { resumeBanner.hidden = true; return; }
+      resumeFile = file && sessionMatches(s, file) ? file : null;
+      const total = sessionChunks(s);
+      const pct = Math.round((s.parts.length / total) * 100);
+      const progress = `${s.parts.length}/${total} 分片 (${pct}%)`;
+      resumeText.textContent = resumeFile
+        ? `⏸ "${s.file.name}" 已上传 ${progress}，可继续。`
+        : `⏸ 有未完成的上传: "${s.file.name}" — ${progress}。请重新选择同一个文件以继续。`;
+      btnResume.disabled = !resumeFile;
+      resumeBanner.hidden = false;
+    }
+
+    btnResume.addEventListener('click', () => {
+      const s = loadSession();
+      if (!s || !resumeFile || !sessionMatches(s, resumeFile)) {
+        showResult(false, '❌ 所选文件与未完成的上传不匹配，无法续传。');
+        return;
+      }
+      resumeBanner.hidden = true;
+      acquireWakeLock('click'); // this click is the gesture WebKit requires
+      runUpload(resumeFile, s);
+    });
+
+    btnDiscard.addEventListener('click', async () => {
+      const s = loadSession();
+      resumeBanner.hidden = true;
+      resumeFile = null;
+      clearSession();
+      await abortSession(s);
+      showResult(true, '🗑 已放弃未完成的上传，服务端分片已清理。');
+    });
+
+    // A stored session outlives the page, so surface it on load. There is no
+    // File yet, so the banner asks for a re-selection rather than offering
+    // Resume outright.
+    if (loadSession()) showResumeBanner(null);
+
     // Upload — multipart for large files
     const CHUNK_SIZE = 25 * 1024 * 1024; // 25 MB per chunk
     const dupWarning = document.getElementById('dup-warning');
@@ -622,25 +724,18 @@
       }
     }
 
+    // Opens a fresh multipart upload, then hands off to runUpload. Split from
+    // the transfer loop so that resuming can re-enter the loop with a stored
+    // session and never call /upload/start twice — a second start would mint a
+    // second key and orphan everything already uploaded under the first.
     async function doMultipartUpload(file, path, overwrite) {
       uploadBtn.disabled = true;
-      uploadBtn.textContent = '⏳ 准备上传...';
-      progressWrapper.hidden = false;
-      progressBar.style.width = '0%';
-      document.getElementById('progress-text').textContent = '';
+      uploadBtn.textContent = '⏳ 创建上传...';
       uploadResult.hidden = true;
       dupWarning.hidden = true;
 
-      uploadInProgress = true;
-      acquireWakeLock('upload').then(setWakeHint);
-
-      let uploadId = null;
-      let key = null;   // R2 object name, minted by the server
-      let uploadPath = null;  // display path the row will be listed under
-
+      let session;
       try {
-        // 1. Start multipart upload
-        uploadBtn.textContent = '⏳ 创建上传...';
         const startResp = await fetch('/admin/api/upload/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -655,59 +750,127 @@
           const errData = await startResp.json().catch(() => ({}));
           if (startResp.status === 409 && errData.error === 'duplicate') {
             showResult(false, `❌ 文件已存在: ${errData.path}。请刷新页面后重试。`);
+            uploadBtn.textContent = '🚀 上传';
+            uploadBtn.disabled = false;
             return;
           }
           throw new Error(`Start failed: ${startResp.status}`);
         }
         const startData = await startResp.json();
-        uploadId = startData.upload_id;
-        key = startData.key;
-        uploadPath = startData.path;
+        session = {
+          upload_id: startData.upload_id,
+          key: startData.key,       // server-minted; resume replays it, never re-mints
+          path: startData.path,
+          contentType: file.type || 'application/octet-stream',
+          chunkSize: CHUNK_SIZE,
+          overwrite: !!overwrite,
+          parts: [],
+          file: { name: file.name, size: file.size, lastModified: file.lastModified },
+        };
+        // Only one session is stored, so starting a new upload evicts whatever
+        // was there. Abort it rather than leaving its parts stranded in R2 with
+        // nothing left that knows the upload_id.
+        const stale = loadSession();
+        if (stale && stale.upload_id !== session.upload_id) await abortSession(stale);
+        saveSession(session);
+      } catch (err) {
+        console.error('Upload start failed:', err);
+        showResult(false, `❌ 上传失败: ${err.message}`);
+        uploadBtn.textContent = '🚀 上传';
+        uploadBtn.disabled = false;
+        return;
+      }
 
-        // 2. Upload chunks — ensure at least 1 part (R2 requires ≥1 part, even for 0-byte files)
-        const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-        const parts = [];
-        let uploadedBytes = 0;
+      await runUpload(file, session);
+    }
 
+    // Bytes already committed, derived from which part numbers are done. Every
+    // part is chunkSize except the last, so this is exact — and it makes a
+    // resumed upload's progress bar start where it left off instead of at 0.
+    function bytesDone(doneParts, session) {
+      let total = 0;
+      for (const n of doneParts.keys()) {
+        total += Math.min(session.chunkSize, session.file.size - (n - 1) * session.chunkSize);
+      }
+      return total;
+    }
+
+    function renderProgress(loaded, size) {
+      // size 0 is a legitimate upload (R2 still wants one empty part), and
+      // 0/0 would put NaN in the width.
+      progressBar.style.width = (size > 0 ? Math.round((loaded / size) * 100) : 100) + '%';
+      document.getElementById('progress-text').textContent =
+        `${formatSize(loaded)} / ${formatSize(size)}`;
+    }
+
+    // The transfer loop. Entered both by a fresh upload and by Resume, and it
+    // cannot tell the difference — the only input is the session.
+    async function runUpload(file, session) {
+      uploadBtn.disabled = true;
+      progressWrapper.hidden = false;
+      uploadResult.hidden = true;
+      dupWarning.hidden = true;
+
+      uploadInProgress = true;
+      acquireWakeLock('upload').then(setWakeHint);
+
+      // Always the session's chunk size, never CHUNK_SIZE. R2 requires every
+      // part but the last to be identically sized, so raising the constant
+      // would silently corrupt any session started under the old one.
+      const totalChunks = sessionChunks(session);
+      const done = new Map(session.parts.map(p => [p.n, p]));
+      renderProgress(bytesDone(done, session), file.size);
+
+      try {
         for (let i = 0; i < totalChunks; i++) {
-          const start = i * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, file.size);
-          const chunk = file.slice(start, end);
+          const n = i + 1;
+          if (done.has(n)) continue; // already committed in an earlier attempt
 
-          uploadBtn.textContent = `⏳ 上传中 ${i + 1}/${totalChunks}...`;
+          const start = i * session.chunkSize;
+          const chunk = file.slice(start, Math.min(start + session.chunkSize, file.size));
+          const base = bytesDone(done, session);
 
-          const part = await uploadChunk(uploadId, key, i + 1, chunk, (chunkLoaded) => {
-            const total = uploadedBytes + chunkLoaded;
-            const pct = Math.round((total / file.size) * 100);
-            progressBar.style.width = pct + '%';
-            document.getElementById('progress-text').textContent =
-              `${formatSize(total)} / ${formatSize(file.size)}`;
+          uploadBtn.textContent = `⏳ 上传中 ${n}/${totalChunks}...`;
+          const part = await uploadChunkWithRetry(session, n, chunk, (chunkLoaded) => {
+            renderProgress(base + chunkLoaded, file.size);
           });
 
-          parts.push(part);
-          uploadedBytes += chunk.size;
+          done.set(n, { n: part.part_number, etag: part.etag });
+          session.parts = [...done.values()].sort((a, b) => a.n - b.n);
+          saveSession(session);
+          renderProgress(bytesDone(done, session), file.size);
         }
 
-        // 3. Complete
         uploadBtn.textContent = '⏳ 完成中...';
         progressBar.style.width = '100%';
         const completeResp = await fetch(
-          `/admin/api/upload/complete?upload_id=${encodeURIComponent(uploadId)}&key=${encodePath(key)}`,
+          `/admin/api/upload/complete?upload_id=${encodeURIComponent(session.upload_id)}&key=${encodePath(session.key)}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              parts: parts.map(p => ({ n: p.part_number, etag: p.etag })),
-              content_type: file.type || 'application/octet-stream',
-              path: uploadPath,
+              parts: session.parts,
+              content_type: session.contentType,
+              path: session.path,
+              overwrite: session.overwrite,
             }),
           }
         );
+        if (completeResp.status === 409) {
+          // Someone took this name while the session was paused. The server
+          // refused rather than overwriting them — this session is dead.
+          const d = await completeResp.json().catch(() => ({}));
+          throw uploadError(
+            `名称 "${d.path || session.path}" 已被其他文件占用，无法完成续传。`, 409);
+        }
         if (!completeResp.ok) {
-          throw new Error(await errorMessage(completeResp));
+          throw uploadError(await errorMessage(completeResp), completeResp.status);
         }
         const completeData = await completeResp.json();
 
+        clearSession();
+        resumeFile = null;
+        resumeBanner.hidden = true;
         showResult(true, `✅ 上传成功! ${completeData.path} (${formatSize(completeData.size)})`);
         customPath.value = '';
         selectedFile = null;
@@ -718,28 +881,70 @@
 
       } catch (err) {
         console.error('Upload error:', err);
-        showResult(false, `❌ 上传失败: ${err.message}`);
-        // Abort multipart upload on error
-        if (uploadId && key) {
-          try {
-            await fetch(
-              `/admin/api/upload?upload_id=${encodeURIComponent(uploadId)}&key=${encodePath(key)}`,
-              { method: 'DELETE' }
-            );
-          } catch (_) { /* ignore abort errors */ }
+        const resumable = session.parts.length > 0 && err.status !== 409;
+        if (resumable) {
+          // Deliberately no abort call. Aborting here is what used to throw
+          // away every part already transferred; leaving the multipart upload
+          // open is what makes Resume possible at all. The cost is an orphaned
+          // upload in R2 if the admin never comes back — Discard cleans it up,
+          // and an R2 lifecycle rule is the backstop for the rest.
+          saveSession(session);
+          showResult(false,
+            `⏸ 上传中断: ${err.message} — 已保留 ${session.parts.length}/${totalChunks} 个分片，可继续。`);
+          showResumeBanner(file);
+        } else {
+          await abortSession(session);
+          clearSession();
+          resumeFile = null;
+          resumeBanner.hidden = true;
+          showResult(false, `❌ 上传失败: ${err.message}`);
         }
       } finally {
-        // Drop the lock as soon as the upload settles — the timeout below only
-        // lets the finished progress bar linger, and the screen shouldn't be
-        // held awake for that.
+        // A paused upload is not an upload in progress: the lock comes off and
+        // beforeunload stops warning, because the session now survives a reload
+        // and Resume re-acquires the lock inside its own click.
         uploadInProgress = false;
         releaseWakeLock();
-        uploadBtn.disabled = true;
+        uploadBtn.disabled = !selectedFile;
         uploadBtn.textContent = '🚀 上传';
         setTimeout(() => {
           progressWrapper.hidden = true;
           wakeHint.hidden = true;
         }, 1500);
+      }
+    }
+
+    function uploadError(message, status) {
+      const err = new Error(message);
+      err.status = status;
+      return err;
+    }
+
+    // status 0 means the request never got an answer — offline, DNS, a dropped
+    // connection — which is exactly what a retry is for. 5xx and 429 likewise.
+    // 4xx are not retried: the per-part Origin check and Access JWT
+    // verification fail deterministically, so backoff would just burn four
+    // attempts. An expired admin session lands here as 403 and needs a reload,
+    // not patience — hence the distinct message below.
+    function isRetryable(err) {
+      return err.status === 0 || err.status === 429 || (err.status >= 500 && err.status < 600);
+    }
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function uploadChunkWithRetry(session, partNumber, blob, onProgress) {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await uploadChunk(session.upload_id, session.key, partNumber, blob, onProgress);
+        } catch (err) {
+          if (err.status === 401 || err.status === 403) {
+            throw uploadError('管理会话已过期，请刷新页面后继续上传。', err.status);
+          }
+          if (!isRetryable(err) || attempt >= PART_RETRIES) throw err;
+          uploadBtn.textContent = `⏳ 分片 ${partNumber} 重试 ${attempt}/${PART_RETRIES - 1}...`;
+          onProgress(0); // the chunk restarts from zero; un-count the partial send
+          await sleep(1000 * Math.pow(2, attempt - 1)); // 1s, 2s, 4s
+        }
       }
     }
 
@@ -758,14 +963,18 @@
             try {
               resolve(JSON.parse(xhr.responseText));
             } catch (e) {
-              reject(new Error(`Part ${partNumber}: invalid JSON response`));
+              reject(uploadError(`分片 ${partNumber}: 响应不是 JSON`, xhr.status));
             }
           } else {
-            reject(new Error(`Part ${partNumber}: HTTP ${xhr.status} — ${xhr.responseText?.substring(0, 200)}`));
+            reject(uploadError(
+              `分片 ${partNumber}: HTTP ${xhr.status} — ${(xhr.responseText || '').substring(0, 200)}`,
+              xhr.status));
           }
         });
 
-        xhr.addEventListener('error', () => reject(new Error(`Part ${partNumber}: network error`)));
+        // status 0 on both: no response ever arrived, so this is retryable.
+        xhr.addEventListener('error', () => reject(uploadError(`分片 ${partNumber}: 网络错误`, 0)));
+        xhr.addEventListener('timeout', () => reject(uploadError(`分片 ${partNumber}: 超时`, 0)));
 
         const params = new URLSearchParams({
           upload_id: uploadId,
