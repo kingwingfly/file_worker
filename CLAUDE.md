@@ -107,17 +107,27 @@ mostly went away.
 
 ### Video codecs
 
-The library is being converted to HEVC (see README for the ffmpeg commands).
-Chrome has no software HEVC decoder — it plays HEVC only where the OS supplies a
-hardware one, so Chrome on Linux and stock Windows cannot play these files at all
-and no server-side change fixes that.
+Uploads are a mix of H.264, HEVC and AV1 (see README for the matrix and ffmpeg
+commands). Nothing server-side varies per codec — everything is stored and served
+as `video/mp4`. Two facts drive the frontend handling and are easy to get
+backwards:
 
-Everything is served as `video/mp4` regardless of the codec inside, so the player
-cannot know in advance whether a given file is decodable. Do **not** add a
-`canPlayType` probe before playback — it reports browser support, not file
-contents, and would warn on H.264 files too. The `<video>` `error` listener in
-`openPreview` checks for `MEDIA_ERR_SRC_NOT_SUPPORTED` and swaps in a download
-button; that is the correct signal because it fires only on real decode failure.
+- Chrome has **no software HEVC decoder**; it needs one from the OS. HEVC fails
+  on Chrome/Linux and on Firefox everywhere.
+- Chrome and Firefox **do** ship a software AV1 decoder, so AV1 works on any
+  platform there. Safari needs 17+ *and* M3-generation silicon.
+
+Because the served type is `video/mp4` whatever is inside, the player cannot know
+in advance whether a file is decodable. Do **not** add a `canPlayType` gate before
+playback — it reports browser support, not file contents, and would warn on H.264
+files too. The `<video>` `error` listener in `openPreview` checks for
+`MEDIA_ERR_SRC_NOT_SUPPORTED`; only then does `unplayableNotice` probe all four
+codecs to describe the device and offer a download. Post-failure diagnosis is the
+correct use of `canPlayType`; pre-flight gating is not.
+
+Deliberately not implemented: parsing the MP4 `stsd` box (via a Range fetch) to
+name the file's actual codec. It ends at the same download button, and needs a
+moov-at-tail fallback for files without `+faststart`.
 
 ## Frontend
 

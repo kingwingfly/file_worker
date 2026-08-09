@@ -566,6 +566,18 @@ body::after {
   margin-bottom: 1.25rem;
 }
 
+.modal-media .media-unplayable .codec-support {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  justify-content: center;
+  margin: -0.75rem 0 1.25rem;
+  font-size: 0.85rem;
+}
+
+.modal-media .media-unplayable .codec-support .ok { color: #8fd19e; }
+.modal-media .media-unplayable .codec-support .no { color: #f1948a; }
+
 .modal-media .media-unplayable button {
   padding: 0.6rem 1.5rem;
   border-radius: 999px;

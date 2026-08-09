@@ -96,11 +96,44 @@ Non-GET calls to `/admin/api/*` require an `Origin` header matching the worker's
 own origin (CSRF defence — admin auth is a cookie). The admin page satisfies this
 automatically; scripted clients must send `Origin` explicitly.
 
-## 🎬 Encoding videos
+## 🎬 Video codecs
 
-HEVC (H.265) roughly halves the file size of H.264 at the same quality, which is
-worth it here because R2 egress and upload time both scale with bytes. NVENC on a
-CUDA GPU:
+The gallery serves whatever the admin uploads — H.264, HEVC (H.265) and AV1 in
+MP4 all work. Nothing server-side needs to change per codec: everything is stored
+and served as `video/mp4`, and the browser decodes it.
+
+What *does* vary is which browsers can decode what. There is no codec that is
+both small and universal, so the choice is a real trade:
+
+| Codec | Chrome | Firefox | Safari | Size vs H.264 |
+|-------|--------|---------|--------|---------------|
+| **H.264** | ✅ | ✅ | ✅ | baseline |
+| **HEVC (H.265)** | ⚠️ macOS & Android yes; Windows only with Microsoft's HEVC Video Extensions; **Linux no** | ❌ | ✅ | ~50% |
+| **AV1** | ✅ any platform (software decoder) | ✅ any platform | ⚠️ Safari 17+ **and** M3-generation Apple silicon or newer | ~50%, slower to encode |
+
+The two lopsided rows are near-inverses, which is the thing to internalise:
+Chrome has **no software HEVC decoder** and depends on one supplied by the OS,
+while Chrome and Firefox both ship a **software AV1 decoder** that works
+everywhere. So HEVC fails on Linux/Firefox, and AV1 fails on older Apple
+hardware. **H.264 is the only universally safe choice.**
+
+### When a browser can't decode
+
+No server setting fixes a missing decoder, so the gallery fails loudly instead of
+showing a black player. If `<video>` reports `MEDIA_ERR_SRC_NOT_SUPPORTED`, the
+preview is replaced by a panel that probes this device with `canPlayType` and
+lists what it actually supports (`✅ H.264  ❌ HEVC  ✅ AV1  ✅ VP9`), names the
+browser to switch to for the codec it lacks, and offers a download button — the
+one path that works in every browser.
+
+The probe runs *only after* a real failure. As a pre-flight check it would be
+wrong: the file is served as `video/mp4` whatever is inside, so `canPlayType`
+reports browser capability and says nothing about this file's contents.
+
+### Encoding
+
+NVENC on a CUDA GPU. HEVC — roughly half the bytes of H.264, which matters for R2
+egress and upload time, at the cost of the Linux/Firefox gap above:
 
 ```bash
 ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \
@@ -109,43 +142,7 @@ ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \
   -movflags +faststart out_hevc.mp4
 ```
 
-Three of those flags matter for playback through this worker specifically:
-
-- **`-tag:v hvc1`** — Safari refuses HEVC tagged `hev1`, which is ffmpeg's
-  default. This is the usual reason a file plays in VLC but shows a black frame
-  in Safari. Non-negotiable.
-- **`-movflags +faststart`** — moves the `moov` atom to the front of the file.
-  Without it the player must fetch the tail before it can start, so playback
-  stalls until most of the file has downloaded.
-- **`-g 48`** — a keyframe every ~2s bounds how precisely a seek can land. The
-  worker's HTTP Range support (`206` responses on `/api/file/{key}`) is what
-  turns a seek into a small ranged fetch instead of a full download.
-
-`-c:a copy` keeps whatever audio codec the source had. If your sources aren't
-uniform, use `-c:a aac -b:a 192k` instead — Opus in MP4, for example, will not
-play in Safari and `copy` carries that problem forward.
-
-### Browser support — read this before converting everything
-
-| Browser | HEVC in MP4 |
-|---------|-------------|
-| Safari (macOS / iOS / iPadOS) | ✅ |
-| Chrome / Edge on macOS | ✅ |
-| Chrome on Android | ✅ (with a hardware decoder) |
-| Chrome / Edge on Windows | ⚠️ only with Microsoft's HEVC Video Extensions installed |
-| Chrome on Linux | ❌ |
-| Firefox (all platforms) | ❌ |
-
-Chrome has **no software HEVC decoder** — it plays HEVC only where the operating
-system provides a hardware one. No server-side setting changes this, so an
-HEVC-only library is genuinely unplayable for some visitors.
-
-The gallery handles that honestly rather than silently: if the `<video>` element
-reports `MEDIA_ERR_SRC_NOT_SUPPORTED`, the preview is replaced with an
-explanation and a download button, so the file is still reachable.
-
-If you need playback everywhere, encode H.264 instead — same container flags,
-noticeably larger files:
+H.264 — larger files, plays everywhere:
 
 ```bash
 ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \
@@ -153,6 +150,29 @@ ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \
   -g 48 -c:a aac -b:a 192k \
   -movflags +faststart out_h264.mp4
 ```
+
+AV1 — `-c:v av1_nvenc` needs a 40-series (Ada) GPU or newer; on older cards use
+`-c:v libaom-av1 -crf 30 -b:v 0` or `libsvtav1`, both much slower than NVENC.
+
+Flags that matter for playback through this worker specifically:
+
+- **`-tag:v hvc1`** (HEVC only) — Safari refuses HEVC tagged `hev1`, which is
+  ffmpeg's default. This is the usual reason a file plays in VLC but shows a
+  black frame in Safari. Non-negotiable.
+- **`-movflags +faststart`** — moves the `moov` atom to the front. Without it the
+  player must fetch the tail before it can start, so playback stalls until most
+  of the file has downloaded. Applies to every codec.
+- **`-g 48`** — a keyframe every ~2s bounds how precisely a seek can land. The
+  worker's HTTP Range support (`206` on `/api/file/{key}`) is what turns a seek
+  into a small ranged fetch instead of a full download.
+
+`-c:a copy` keeps the source's audio codec. If your sources aren't uniform, use
+`-c:a aac -b:a 192k` — Opus in MP4, for example, will not play in Safari, and
+`copy` carries that problem forward.
+
+Use MP4. `.mkv` passes the server's `video/*` check but no browser plays it, so
+it reaches the same "can't decode" panel with the container, not the codec, as
+the cause.
 
 Uploading a re-encode under the same name is an **overwrite** (the admin page
 offers it when the name collides). That writes a new R2 object and drops the old
