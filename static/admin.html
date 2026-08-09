@@ -437,21 +437,37 @@
     let wakeLockPending = null;
     let uploadInProgress = false;
 
-    async function acquireWakeLock() {
+    async function acquireWakeLock(site) {
       if (!('wakeLock' in navigator)) return false;
       // Two callers (upload start, visibilitychange) can race here. Without
       // this guard both requests resolve, the second overwrites `wakeLock`,
       // and the first sentinel is orphaned — the screen then stays awake after
       // the upload finishes, with nothing left holding a reference to release.
-      if (wakeLock || wakeLockPending) return !!wakeLock;
+      if (wakeLock) return true;
+      if (wakeLockPending) {
+        try { await wakeLockPending; } catch (_) { /* the first caller logs it */ }
+        return !!wakeLock;
+      }
       try {
         wakeLockPending = navigator.wakeLock.request('screen');
         wakeLock = await wakeLockPending;
         wakeLock.addEventListener('release', () => { wakeLock = null; });
         return true;
       } catch (err) {
-        // NotAllowedError — typically battery saver, or the page isn't visible.
-        console.warn('Wake lock refused:', err);
+        // Safari denies with a bare NotAllowedError for several unrelated
+        // reasons — Low Power Mode, a hidden or not-yet-fully-active document,
+        // an insecure origin — and the message never says which. Log the state
+        // that tells them apart, plus which call site asked.
+        const detail =
+          `site=${site} visibility=${document.visibilityState} secure=${isSecureContext}`;
+        if (site === 'visibilitychange') {
+          // Known WebKit behaviour: the document can report 'visible' before it
+          // is fully active again, so a re-acquire fails routinely on Safari.
+          // The on-page hint already covers it — don't shout in the console.
+          console.debug(`Wake lock not re-acquired (${err.name}) — ${detail}`);
+        } else {
+          console.warn(`Wake lock refused (${err.name}: ${err.message}) — ${detail}`);
+        }
         wakeLock = null;
         return false;
       } finally {
@@ -480,7 +496,7 @@
 
     document.addEventListener('visibilitychange', () => {
       if (!uploadInProgress || document.visibilityState !== 'visible') return;
-      acquireWakeLock().then(setWakeHint);
+      acquireWakeLock('visibilitychange').then(setWakeHint);
     });
 
     // Closing the tab mid-upload kills the transfer and strands the multipart
@@ -575,7 +591,7 @@
       dupWarning.hidden = true;
 
       uploadInProgress = true;
-      acquireWakeLock().then(setWakeHint);
+      acquireWakeLock('upload').then(setWakeHint);
 
       let uploadId = null;
       let key = null;   // R2 object name, minted by the server
