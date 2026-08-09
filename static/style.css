@@ -544,6 +544,39 @@ body::after {
   outline: none;
 }
 
+/* Shown when the browser cannot decode the file — most often HEVC in a
+   Chrome build with no platform decoder. Download is the only recourse,
+   so the button is the point of this box. */
+.modal-media .media-unplayable {
+  color: #f0f0f0;
+  text-align: center;
+  padding: 3rem 2rem;
+  max-width: 34rem;
+}
+
+.modal-media .media-unplayable h3 {
+  font-size: 1.05rem;
+  margin-bottom: 0.75rem;
+}
+
+.modal-media .media-unplayable p {
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #b8b8b8;
+  margin-bottom: 1.25rem;
+}
+
+.modal-media .media-unplayable button {
+  padding: 0.6rem 1.5rem;
+  border-radius: 999px;
+  border: none;
+  background: var(--pink);
+  color: var(--white);
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
 .modal-media audio {
   width: 90%;
   max-width: 600px;

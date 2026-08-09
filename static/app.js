@@ -207,6 +207,18 @@ function openPreview(file) {
     vid.preload = 'metadata';
     vid.style.width = '100%';
     vid.style.maxHeight = '80vh';
+    // Videos are served as video/mp4 whatever codec is inside, so there is no
+    // way to know up front whether this browser can decode them — HEVC plays in
+    // Safari everywhere and in Chrome only where the OS supplies a hardware
+    // decoder. Let the element try, and catch the one error that means
+    // "cannot decode at all" so the user gets a download instead of a black box.
+    vid.addEventListener('error', () => {
+      if (!vid.error || vid.error.code !== vid.error.MEDIA_ERR_SRC_NOT_SUPPORTED) return;
+      // The event can land after the user moved on; don't overwrite whatever
+      // the modal is showing now.
+      if (state.currentPreview !== file) return;
+      dom.modalMedia.replaceChildren(unplayableNotice(file));
+    });
     dom.modalMedia.appendChild(vid);
   } else if (ct.startsWith('audio/')) {
     const wrapper = document.createElement('div');
@@ -242,6 +254,35 @@ function openPreview(file) {
 
   dom.previewModal.hidden = false;
   document.body.style.overflow = 'hidden';
+}
+
+// Replacement for a <video> the browser refused to decode. `canPlayType` is
+// only consulted here, after a known failure, to word the explanation — asking
+// it up front would flag H.264 files too, since the probe reports what the
+// browser supports, not what this file contains.
+function unplayableNotice(file) {
+  const box = document.createElement('div');
+  box.className = 'media-unplayable';
+
+  const title = document.createElement('h3');
+  title.textContent = '⚠️ 此浏览器无法播放该视频';
+
+  const probe = document.createElement('video');
+  const noHevc = probe.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"') === '';
+
+  const detail = document.createElement('p');
+  detail.textContent = noHevc
+    ? '该视频可能是 HEVC (H.265) 编码，而当前浏览器没有可用的解码器。'
+      + 'Safari 均可播放；Chrome 仅在 macOS、Android，以及安装了 HEVC 视频扩展的 Windows 上支持，'
+      + 'Linux 版 Chrome 与 Firefox 不支持。请改用 Safari，或下载后用本地播放器打开。'
+    : '视频编码不受此浏览器支持。请下载后用本地播放器打开。';
+
+  const btn = document.createElement('button');
+  btn.textContent = '⬇ 下载原文件';
+  btn.addEventListener('click', () => downloadFile(file));
+
+  box.append(title, detail, btn);
+  return box;
 }
 
 function closePreview() {

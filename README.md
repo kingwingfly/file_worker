@@ -96,6 +96,69 @@ Non-GET calls to `/admin/api/*` require an `Origin` header matching the worker's
 own origin (CSRF defence — admin auth is a cookie). The admin page satisfies this
 automatically; scripted clients must send `Origin` explicitly.
 
+## 🎬 Encoding videos
+
+HEVC (H.265) roughly halves the file size of H.264 at the same quality, which is
+worth it here because R2 egress and upload time both scale with bytes. NVENC on a
+CUDA GPU:
+
+```bash
+ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \
+  -c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq 26 -b:v 0 \
+  -g 48 -tag:v hvc1 -c:a copy \
+  -movflags +faststart out_hevc.mp4
+```
+
+Three of those flags matter for playback through this worker specifically:
+
+- **`-tag:v hvc1`** — Safari refuses HEVC tagged `hev1`, which is ffmpeg's
+  default. This is the usual reason a file plays in VLC but shows a black frame
+  in Safari. Non-negotiable.
+- **`-movflags +faststart`** — moves the `moov` atom to the front of the file.
+  Without it the player must fetch the tail before it can start, so playback
+  stalls until most of the file has downloaded.
+- **`-g 48`** — a keyframe every ~2s bounds how precisely a seek can land. The
+  worker's HTTP Range support (`206` responses on `/api/file/{key}`) is what
+  turns a seek into a small ranged fetch instead of a full download.
+
+`-c:a copy` keeps whatever audio codec the source had. If your sources aren't
+uniform, use `-c:a aac -b:a 192k` instead — Opus in MP4, for example, will not
+play in Safari and `copy` carries that problem forward.
+
+### Browser support — read this before converting everything
+
+| Browser | HEVC in MP4 |
+|---------|-------------|
+| Safari (macOS / iOS / iPadOS) | ✅ |
+| Chrome / Edge on macOS | ✅ |
+| Chrome on Android | ✅ (with a hardware decoder) |
+| Chrome / Edge on Windows | ⚠️ only with Microsoft's HEVC Video Extensions installed |
+| Chrome on Linux | ❌ |
+| Firefox (all platforms) | ❌ |
+
+Chrome has **no software HEVC decoder** — it plays HEVC only where the operating
+system provides a hardware one. No server-side setting changes this, so an
+HEVC-only library is genuinely unplayable for some visitors.
+
+The gallery handles that honestly rather than silently: if the `<video>` element
+reports `MEDIA_ERR_SRC_NOT_SUPPORTED`, the preview is replaced with an
+explanation and a download button, so the file is still reachable.
+
+If you need playback everywhere, encode H.264 instead — same container flags,
+noticeably larger files:
+
+```bash
+ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \
+  -c:v h264_nvenc -preset p6 -tune hq -rc vbr -cq 23 -b:v 0 \
+  -g 48 -c:a aac -b:a 192k \
+  -movflags +faststart out_h264.mp4
+```
+
+Uploading a re-encode under the same name is an **overwrite** (the admin page
+offers it when the name collides). That writes a new R2 object and drops the old
+one, so the `/api/file/{key}` URL changes — which is exactly what keeps the
+year-long `immutable` cache correct.
+
 ## 📁 Structure
 
 ```

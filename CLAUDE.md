@@ -105,6 +105,20 @@ half-failure leaves a retryable row rather than a phantom listing. Rename no
 longer touches R2 at all, which is the main reason the whole class of problem
 mostly went away.
 
+### Video codecs
+
+The library is being converted to HEVC (see README for the ffmpeg commands).
+Chrome has no software HEVC decoder — it plays HEVC only where the OS supplies a
+hardware one, so Chrome on Linux and stock Windows cannot play these files at all
+and no server-side change fixes that.
+
+Everything is served as `video/mp4` regardless of the codec inside, so the player
+cannot know in advance whether a given file is decodable. Do **not** add a
+`canPlayType` probe before playback — it reports browser support, not file
+contents, and would warn on H.264 files too. The `<video>` `error` listener in
+`openPreview` checks for `MEDIA_ERR_SRC_NOT_SUPPORTED` and swaps in a download
+button; that is the correct signal because it fires only on real decode failure.
+
 ## Frontend
 
 `static/admin.html` and `static/app.js` are plain inline JS, no build step.
