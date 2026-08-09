@@ -34,6 +34,7 @@ fn content_disposition(filename: &str) -> String {
 mod auth;
 mod cors;
 mod db;
+mod identity;
 
 /// Mint the R2 object name for a new upload.
 ///
@@ -278,6 +279,213 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 }
                 None => Ok(Response::error("Not Found", 404)?.with_headers(cors::headers()?)),
             }
+        })
+        // === Public Clip API ===
+        // GET /api/proxy?file_path=... — list proxy videos for a file (public)
+        .get_async("/api/proxy", |req, ctx| async move {
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let file_path = qs.get("file_path").map(|s| s.as_str()).unwrap_or("");
+
+            if file_path.is_empty() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "proxies": [],
+                }))?
+                .with_headers(cors::headers()?));
+            }
+
+            let proxies = db::list_proxies(&ctx, file_path).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "proxies": proxies,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /api/identity — issue a signed identity cookie
+        .post_async("/api/identity", |mut req, ctx| async move {
+            let body: serde_json::Value = req.json().await?;
+            let nickname = body["nickname"].as_str().unwrap_or("").to_string();
+
+            // Generate a random id. js_sys::Math::random() is available in WASM.
+            let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+            let ts = Date::now().as_millis();
+            let id = format!("{:08x}-{:08x}", rand, ts as u32);
+
+            let secret = ctx.secret("IDENTITY_SECRET")?.to_string();
+            let token = identity::sign_identity(&id, &nickname, secret.as_bytes())
+                .ok_or_else(|| worker::Error::RustError("failed to sign identity token".into()))?;
+
+            let cookie_value = format!(
+                "identity={}; Path=/; SameSite=Lax; Max-Age=31536000",
+                token
+            );
+
+            let mut headers = Headers::new();
+            headers.set("Set-Cookie", &cookie_value)?;
+            cors::extend_headers(&mut headers)?;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "id": id,
+                "nickname": nickname,
+            }))?
+            .with_headers(headers))
+        })
+        // GET /api/identity/me — return the current identity (or null)
+        .get_async("/api/identity/me", |req, ctx| async move {
+            let secret = ctx.secret("IDENTITY_SECRET")?.to_string();
+            let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+            let me = identity::extract_identity_cookie(&cookie_header)
+                .and_then(|token| identity::verify_identity(token, secret.as_bytes()));
+
+            Ok(Response::from_json(&serde_json::json!({
+                "identity": me.map(|p| serde_json::json!({
+                    "id": p.id,
+                    "nickname": p.nickname,
+                })),
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // GET /api/clips — list public clips, optionally filtered by file_path
+        .get_async("/api/clips", |req, ctx| async move {
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let file_path = qs.get("file_path").map(|s| s.as_str());
+            let sort = qs.get("sort").map(|s| s.as_str()).unwrap_or("time");
+            let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u32 = qs.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50).min(100);
+
+            let clips = db::list_clips(&ctx, file_path, sort, offset, limit).await?;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "clips": clips,
+                "offset": offset,
+                "limit": limit,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /api/clips — create a clip (requires identity cookie)
+        .post_async("/api/clips", |mut req, ctx| async move {
+            let secret = ctx.secret("IDENTITY_SECRET")?.to_string();
+            let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+            let who = identity::extract_identity_cookie(&cookie_header)
+                .and_then(|token| identity::verify_identity(token, secret.as_bytes()))
+                .ok_or_else(|| worker::Error::RustError("identity cookie missing or invalid".into()))?;
+
+            let body: serde_json::Value = req.json().await?;
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let name = body["name"].as_str().unwrap_or("").to_string();
+            let description = body["description"].as_str().unwrap_or("").to_string();
+            let start_time: f64 = body["start_time"].as_f64().unwrap_or(0.0);
+            let end_time: f64 = body["end_time"].as_f64().unwrap_or(0.0);
+            let is_public = body["is_public"].as_bool().unwrap_or(false);
+
+            if file_path.is_empty() || start_time >= end_time {
+                return Ok(Response::error("Bad Request: file_path and valid start/end times are required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            // Generate a UUID-like id client-visible but server-generated.
+            let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+            let ts = Date::now().as_millis();
+            let id = format!("clip_{:08x}{:08x}", rand, ts as u32);
+
+            db::insert_clip(
+                &ctx, &id, &file_path, &who.id, &who.nickname,
+                &name, &description, start_time, end_time, is_public,
+            ).await?;
+
+            let clip = db::get_clip(&ctx, &id).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "clip": clip,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // DELETE /api/clips/*id — delete own clip (identity must match)
+        .delete_async("/api/clips/*id", |req, ctx| async move {
+            let secret = ctx.secret("IDENTITY_SECRET")?.to_string();
+            let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+            let who = identity::extract_identity_cookie(&cookie_header)
+                .and_then(|token| identity::verify_identity(token, secret.as_bytes()))
+                .ok_or_else(|| worker::Error::RustError("identity cookie missing or invalid".into()))?;
+
+            let id = ctx.param("id").map_or("", |v| v);
+
+            let clip = db::get_clip(&ctx, id).await?
+                .ok_or_else(|| worker::Error::RustError("clip not found".into()))?;
+
+            if clip.identity != who.id {
+                return Ok(Response::error("Forbidden: not your clip", 403)?
+                    .with_headers(cors::headers()?));
+            }
+
+            db::delete_clip(&ctx, id).await?;
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
+        })
+        // POST /api/clips/*id/like — like a clip (identity required, no nickname needed)
+        .post_async("/api/clips/*id/like", |req, ctx| async move {
+            let secret = ctx.secret("IDENTITY_SECRET")?.to_string();
+            let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+            let who = identity::extract_identity_cookie(&cookie_header)
+                .and_then(|token| identity::verify_identity(token, secret.as_bytes()))
+                .ok_or_else(|| worker::Error::RustError("identity cookie missing or invalid".into()))?;
+
+            let id = ctx.param("id").map_or("", |v| v);
+            let clip = db::get_clip(&ctx, id).await?
+                .ok_or_else(|| worker::Error::RustError("clip not found".into()))?;
+            if clip.is_public == 0 {
+                return Ok(Response::error("Not Found", 404)?.with_headers(cors::headers()?));
+            }
+
+            db::like_clip(&ctx, id, &who.id).await?;
+            let count = db::get_like_count(&ctx, id).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "like_count": count,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // DELETE /api/clips/*id/like — unlike a clip
+        .delete_async("/api/clips/*id/like", |req, ctx| async move {
+            let secret = ctx.secret("IDENTITY_SECRET")?.to_string();
+            let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+            let who = identity::extract_identity_cookie(&cookie_header)
+                .and_then(|token| identity::verify_identity(token, secret.as_bytes()))
+                .ok_or_else(|| worker::Error::RustError("identity cookie missing or invalid".into()))?;
+
+            let id = ctx.param("id").map_or("", |v| v);
+            db::unlike_clip(&ctx, id, &who.id).await?;
+            let count = db::get_like_count(&ctx, id).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "like_count": count,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /api/clips/*id/report — report a public clip
+        .post_async("/api/clips/*id/report", |mut req, ctx| async move {
+            let secret = ctx.secret("IDENTITY_SECRET")?.to_string();
+            let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
+            let who = identity::extract_identity_cookie(&cookie_header)
+                .and_then(|token| identity::verify_identity(token, secret.as_bytes()))
+                .ok_or_else(|| worker::Error::RustError("identity cookie missing or invalid".into()))?;
+
+            let id = ctx.param("id").map_or("", |v| v);
+            let body: serde_json::Value = req.json().await?;
+            let reason = body["reason"].as_str().unwrap_or("");
+
+            let clip = db::get_clip(&ctx, id).await?
+                .ok_or_else(|| worker::Error::RustError("clip not found".into()))?;
+            if clip.is_public == 0 {
+                return Ok(Response::error("Not Found", 404)?.with_headers(cors::headers()?));
+            }
+
+            db::report_clip(&ctx, id, reason, &who.id).await?;
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
         })
         // === Admin API (protected by Cloudflare Access JWT) ===
         // GET /admin/api/files — list all files for admin page
@@ -629,7 +837,261 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             }))?
             .with_headers(cors::headers()?))
         })
-        // Fallback: serve static assets via Fetcher
+        // === Admin Proxy Video API ===
+        // POST /admin/api/proxy/start — begin a proxy video multipart upload
+        .post_async("/admin/api/proxy/start", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Proxy upload start by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let filename = body["filename"].as_str().unwrap_or("proxy.mp4");
+            let label = body["label"].as_str().unwrap_or("").to_string();
+            let content_type =
+                sanitize_content_type(body["content_type"].as_str().unwrap_or_default());
+
+            if file_path.is_empty() {
+                return Ok(Response::error("Bad Request: file_path is required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            // Proxy keys live under `proxies/` so they sort apart from uploads.
+            let ts = Date::now().as_millis();
+            let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+            let key = format!("proxies/{}/{}-{:08x}/{}", ts / 86_400_000, ts, rand, filename);
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let metadata = HttpMetadata {
+                content_type: Some(content_type.clone()),
+                ..Default::default()
+            };
+            let upload = bucket
+                .create_multipart_upload(&key)
+                .http_metadata(metadata)
+                .execute()
+                .await?;
+            let upload_id = upload.upload_id().await;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "upload_id": upload_id,
+                "key": key,
+                "file_path": file_path,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/proxy/complete — finish proxy upload + insert DB record
+        .post_async("/admin/api/proxy/complete", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Proxy complete by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let upload_id = body["upload_id"].as_str().unwrap_or("").to_string();
+            let key = body["key"].as_str().unwrap_or("").to_string();
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let label = body["label"].as_str().unwrap_or("").to_string();
+            let content_type =
+                sanitize_content_type(body["content_type"].as_str().unwrap_or_default());
+            let parts_json = body["parts"]
+                .as_array()
+                .ok_or_else(|| worker::Error::RustError("missing parts array".into()))?;
+
+            if upload_id.is_empty() || key.is_empty() || file_path.is_empty() {
+                return Ok(Response::error("Bad Request: missing upload_id, key, or file_path", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let uploaded_parts: Vec<UploadedPart> = parts_json
+                .iter()
+                .map(|p| {
+                    UploadedPart::new(
+                        p["n"].as_u64().unwrap_or(0) as u16,
+                        p["etag"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+            let obj = upload.complete(uploaded_parts).await?;
+            let size = obj.size() as i64;
+
+            match db::insert_proxy(&ctx, &file_path, &key, &label, &content_type, size).await {
+                Ok(()) => {
+                    console_log!("Proxy complete: file_path={}, key={}, size={}", file_path, key, size);
+                    Ok(Response::from_json(&serde_json::json!({
+                        "ok": true,
+                        "key": key,
+                        "file_path": file_path,
+                        "size": size,
+                    }))?
+                    .with_headers(cors::headers()?))
+                }
+                Err(e) => {
+                    console_log!("Proxy D1 insert failed, cleaning up R2 object: {:?}", e);
+                    let _ = bucket.delete(&key).await;
+                    Err(e)
+                }
+            }
+        })
+        // GET /admin/api/proxy?file_path=... — list proxies for a file (admin)
+        .get_async("/admin/api/proxy", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let file_path = qs.get("file_path").map(|s| s.as_str()).unwrap_or("");
+
+            if file_path.is_empty() {
+                return Ok(Response::error("Bad Request: file_path query param required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let proxies = db::list_proxies(&ctx, file_path).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "proxies": proxies,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/proxy?key=... — delete a proxy by its R2 key
+        .delete_async("/admin/api/proxy", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Proxy delete by: {:?}", claims.email);
+
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let key = qs.get("key").map(|s| s.as_str()).unwrap_or("");
+
+            if key.is_empty() {
+                return Ok(Response::error("Bad Request: key query param required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let _ = bucket.delete(key).await;
+            db::delete_proxy_by_key(&ctx, key).await?;
+
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
+        })
+        // === Admin Clip Management API ===
+        // GET /admin/api/clips — list all clips
+        .get_async("/admin/api/clips", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u32 = qs.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100).min(500);
+
+            let clips = db::list_all_clips(&ctx, offset, limit).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "clips": clips,
+                "offset": offset,
+                "limit": limit,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/clips/*id — delete any clip (admin force-delete)
+        .delete_async("/admin/api/clips/*id", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Admin clip delete by: {:?}", claims.email);
+
+            let id = ctx.param("id").map_or("", |v| v);
+            if id.is_empty() {
+                return Ok(Response::error("Bad Request: missing clip id", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let existed = db::delete_clip(&ctx, id).await?;
+            if !existed {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "not_found",
+                    "message": "切片不存在。",
+                }))?
+                .with_status(404)
+                .with_headers(cors::headers()?));
+            }
+
+            console_log!("Admin deleted clip: {}", id);
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/clips/*id/feature — toggle featured
+        .post_async("/admin/api/clips/*id/feature", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Clip feature toggle by: {:?}", claims.email);
+
+            let id = ctx.param("id").map_or("", |v| v);
+            let body: serde_json::Value = req.json().await?;
+            let featured = body["featured"].as_bool().unwrap_or(false);
+
+            let ok = db::set_clip_featured(&ctx, id, featured).await?;
+            if !ok {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "not_found",
+                    "message": "切片不存在。",
+                }))?
+                .with_status(404)
+                .with_headers(cors::headers()?));
+            }
+
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
+        })
+        // GET /admin/api/clips/reports — list unresolved reports
+        .get_async("/admin/api/clips/reports", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u32 = qs.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50).min(200);
+
+            let reports = db::list_reports(&ctx, offset, limit).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "reports": reports,
+                "offset": offset,
+                "limit": limit,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/clips/reports/*id/resolve — resolve a report
+        .post_async("/admin/api/clips/reports/*id/resolve", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Report resolve by: {:?}", claims.email);
+
+            let id_str = ctx.param("id").map_or("", |v| v);
+            let report_id: i32 = id_str.parse().unwrap_or(0);
+            if report_id == 0 {
+                return Ok(Response::error("Bad Request: invalid report id", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            db::resolve_report(&ctx, report_id).await?;
+            console_log!("Resolved report {}", report_id);
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/identity/*id/clips — batch delete all clips by identity
+        .delete_async("/admin/api/identity/*id/clips", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Batch clip delete by: {:?}", claims.email);
+
+            let identity_id = ctx.param("id").map_or("", |v| v);
+            if identity_id.is_empty() {
+                return Ok(Response::error("Bad Request: missing identity id", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let count = db::delete_clips_by_identity(&ctx, identity_id).await?;
+            console_log!("Deleted {} clips for identity {}", count, identity_id);
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "deleted": count,
+            }))?
+            .with_headers(cors::headers()?))
+        })
         .get_async("/*path", |req, ctx| async move {
             let assets = ctx
                 .env

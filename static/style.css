@@ -724,3 +724,45 @@ body::after {
   outline: 3px solid var(--pink);
   outline-offset: 2px;
 }
+
+/* ── Clip Panel (inside preview modal) ── */
+.clip-panel {
+  border-top: 2px solid var(--soft-blue);
+  padding: 0.75rem 1rem;
+  max-height: 40vh;
+  overflow-y: auto;
+  background: #fafafa;
+}
+
+.clip-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.clip-panel-header h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.clip-panel-close {
+  background: none;
+  border: none;
+  font-size: 1.1rem;
+  cursor: pointer;
+  color: var(--text-light);
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+}
+
+.clip-panel-close:hover {
+  background: #f0f0f0;
+}
+
+.clip-panel-footer {
+  text-align: center;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #f0f0f0;
+}

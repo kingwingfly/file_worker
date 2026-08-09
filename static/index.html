@@ -75,7 +75,18 @@
       <div id="modal-media" class="modal-media"></div>
       <div class="modal-info">
         <span id="modal-filename" class="modal-filename"></span>
+        <button id="modal-clip-btn" class="btn-download" style="margin-right:0.3rem;" title="切片">✂️</button>
         <button id="modal-download" class="btn-download">💾</button>
+      </div>
+      <div id="clip-panel" class="clip-panel" hidden>
+        <div class="clip-panel-header">
+          <h3>✂️ 切片</h3>
+          <button class="clip-panel-close" id="clip-panel-close">✕</button>
+        </div>
+        <div class="clip-panel-list" id="clip-panel-list"></div>
+        <div class="clip-panel-footer">
+          <a id="clip-page-link" href="#" class="btn-load-more" style="display:inline-block;text-decoration:none;padding:0.4rem 1rem;font-size:0.85rem;">📝 打开切片页面</a>
+        </div>
       </div>
     </div>
   </div>

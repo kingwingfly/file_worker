@@ -388,6 +388,45 @@
         </li>
       </ul>
     </div>
+
+    <!-- Proxy Video Section -->
+    <div class="admin-section" id="proxy-section">
+      <h2>📹 代理视频</h2>
+      <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:0.75rem;">
+        为视频上传低质量代理文件，用于切片页面的快速预览。可上传多个代理（如 360p、纯音频等）。
+      </p>
+      <div id="proxy-list"><span style="color:var(--text-light);">请先在文件列表中选择视频文件。</span></div>
+    </div>
+
+    <!-- Clip Management Section -->
+    <div class="admin-section">
+      <h2>✂️ 切片管理</h2>
+      <div style="margin-bottom:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
+        <button class="btn-file-action" id="btn-load-clips">🔄 加载切片</button>
+        <span style="font-size:0.8rem;color:var(--text-light);" id="clip-admin-count"></span>
+      </div>
+      <div id="clip-admin-list"><span style="color:var(--text-light);">点击"加载切片"查看。</span></div>
+    </div>
+
+    <!-- Report Queue Section -->
+    <div class="admin-section">
+      <h2>🚩 举报管理</h2>
+      <button class="btn-file-action" id="btn-load-reports" style="margin-bottom:0.75rem;">🔄 加载举报</button>
+      <div id="report-list"><span style="color:var(--text-light);">点击"加载举报"查看。</span></div>
+    </div>
+
+    <!-- Batch Delete Section -->
+    <div class="admin-section">
+      <h2>🗑 批量删除</h2>
+      <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:0.5rem;">
+        输入用户标识符 (identity id) 删除该用户的所有切片和点赞。
+      </p>
+      <div style="display:flex;gap:0.5rem;">
+        <input type="text" id="batch-identity" placeholder="用户标识符" style="flex:1;padding:0.4rem 0.6rem;border:2px solid var(--soft-blue);border-radius:var(--radius-sm);">
+        <button class="btn-file-action" id="btn-batch-delete" style="color:#C0392B;">删除</button>
+      </div>
+      <div id="batch-result" style="margin-top:0.5rem;font-size:0.85rem;" hidden></div>
+    </div>
   </div>
 
   <footer class="site-footer">
@@ -1357,6 +1396,275 @@
 
     // Initial load
     loadFiles();
+
+    // ── Proxy management ──
+    const proxyList = document.getElementById('proxy-list');
+    let proxyFileData = []; // { file_path, key } from the file listing
+
+    function updateProxySection(files) {
+      proxyFileData = files.filter(f => (f.content_type || '').startsWith('video/') || (f.content_type || '').startsWith('audio/'));
+      if (proxyFileData.length === 0) {
+        proxyList.innerHTML = '<span style="color:var(--text-light);">没有可代理的视频/音频文件。</span>';
+        return;
+      }
+      renderProxyRows();
+      // Refresh proxy counts for each file
+      for (const f of proxyFileData) {
+        fetchProxyCount(f);
+      }
+    }
+
+    async function fetchProxyCount(file) {
+      try {
+        const resp = await fetch('/admin/api/proxy?file_path=' + encodeURIComponent(file.path || file.key));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const count = (data.proxies || []).length;
+        const el = document.getElementById('proxy-count-' + CSS.escape(file.path || file.key));
+        if (el) el.textContent = count + ' 个代理';
+      } catch (_) {}
+    }
+
+    function renderProxyRows() {
+      proxyList.replaceChildren(...proxyFileData.map(f => {
+        const path = f.path || f.key;
+        const name = path.split('/').pop() || path;
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:0.35rem 0;border-bottom:1px solid #f0f0f0;gap:0.5rem;';
+        const nm = document.createElement('span');
+        nm.style.cssText = 'font-size:0.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
+        nm.textContent = '🎬 ' + name;
+        nm.title = path;
+        const cnt = document.createElement('span');
+        cnt.id = 'proxy-count-' + CSS.escape(path);
+        cnt.style.cssText = 'font-size:0.78rem;color:var(--text-light);white-space:nowrap;';
+        cnt.textContent = '...';
+        const btn = document.createElement('button');
+        btn.className = 'btn-file-action';
+        btn.textContent = '📹 上传代理';
+        btn.addEventListener('click', () => startProxyUpload(f));
+        row.append(nm, cnt, btn);
+        return row;
+      }));
+    }
+
+    function startProxyUpload(file) {
+      const path = file.path || file.key;
+      // Create a hidden file input for picking the proxy file
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'video/*,audio/*';
+      input.addEventListener('change', async () => {
+        const proxyFile = input.files[0];
+        if (!proxyFile) return;
+        const label = prompt('代理标签 (如 "360p", "纯音频"):', 'proxy');
+        if (label === null) return;
+        await doProxyUpload(file, proxyFile, label || 'proxy');
+      });
+      input.click();
+    }
+
+    async function doProxyUpload(file, proxyFile, label) {
+      const path = file.path || file.key;
+      try {
+        // Start
+        const startResp = await fetch('/admin/api/proxy/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_path: path,
+            filename: proxyFile.name,
+            content_type: proxyFile.type || 'application/octet-stream',
+            label: label,
+          }),
+        });
+        if (!startResp.ok) throw new Error('Start failed: ' + startResp.status);
+        const { upload_id, key } = await startResp.json();
+
+        // Upload one part (proxies are small — single part is fine)
+        const partResp = await fetch(
+          '/admin/api/upload/part?upload_id=' + encodeURIComponent(upload_id) +
+          '&key=' + encodePath(key) + '&n=1',
+          { method: 'PUT', body: proxyFile }
+        );
+        if (!partResp.ok) throw new Error('Part failed: ' + partResp.status);
+        const { etag } = await partResp.json();
+
+        // Complete
+        const completeResp = await fetch('/admin/api/proxy/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            upload_id, key, file_path: path, label,
+            content_type: proxyFile.type || 'application/octet-stream',
+            parts: [{ n: 1, etag }],
+          }),
+        });
+        if (!completeResp.ok) throw new Error('Complete failed: ' + completeResp.status);
+
+        alert('✅ 代理上传成功！');
+        fetchProxyCount(file);
+      } catch (err) {
+        alert('❌ 代理上传失败: ' + err.message);
+      }
+    }
+
+    // ── Clip management ──
+    $('btn-load-clips').addEventListener('click', loadAdminClips);
+    async function loadAdminClips() {
+      $('btn-load-clips').disabled = true;
+      $('btn-load-clips').textContent = '⏳ ...';
+      try {
+        const resp = await fetch('/admin/api/clips?limit=500');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        $('clip-admin-count').textContent = '共 ' + (data.clips || []).length + ' 个切片';
+        renderAdminClips(data.clips || []);
+      } catch (err) {
+        $('clip-admin-list').innerHTML = '<span style="color:#C0392B;">❌ 加载失败: ' + err.message + '</span>';
+      } finally {
+        $('btn-load-clips').disabled = false;
+        $('btn-load-clips').textContent = '🔄 加载切片';
+      }
+    }
+
+    function renderAdminClips(clips) {
+      if (!clips.length) {
+        $('clip-admin-list').innerHTML = '<span style="color:var(--text-light);">暂无切片。</span>';
+        return;
+      }
+      $('clip-admin-list').replaceChildren(...clips.map(c => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:0.4rem 0;border-bottom:1px solid #f0f0f0;gap:0.5rem;flex-wrap:wrap;';
+        const info = document.createElement('span');
+        info.style.cssText = 'font-size:0.82rem;flex:1;min-width:12rem;';
+        info.innerHTML = '<b>' + (c.name || '未命名').replace(/</g,'&lt;') + '</b> ' +
+          'by ' + (c.nickname || '匿名').replace(/</g,'&lt;') + ' ' +
+          '<span style="color:var(--text-light);">' + formatTime2(c.start_time) + '–' + formatTime2(c.end_time) + '</span>' +
+          ' ❤️' + (c.like_count || 0);
+        const acts = document.createElement('div');
+        acts.style.cssText = 'display:flex;gap:0.25rem;flex-shrink:0;';
+
+        const featBtn = document.createElement('button');
+        featBtn.className = 'btn-file-action';
+        featBtn.textContent = c.is_featured ? '⭐ 取消精选' : '☆ 精选';
+        featBtn.addEventListener('click', async () => {
+          const resp = await fetch('/admin/api/clips/' + encodeURIComponent(c.id) + '/feature', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ featured: !c.is_featured }),
+          });
+          if (resp.ok) loadAdminClips(); else alert('操作失败');
+        });
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn-file-action';
+        delBtn.textContent = '🗑 删除';
+        delBtn.style.color = '#C0392B';
+        delBtn.addEventListener('click', async () => {
+          if (!confirm('确认删除切片 "'+(c.name||'未命名')+'"？')) return;
+          const resp = await fetch('/admin/api/clips/' + encodeURIComponent(c.id), { method: 'DELETE' });
+          if (resp.ok) loadAdminClips(); else alert('删除失败');
+        });
+
+        acts.append(featBtn, delBtn);
+        row.append(info, acts);
+        return row;
+      }));
+    }
+
+    function formatTime2(s) {
+      if (s == null || isNaN(s)) return '0:00';
+      const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+      return m + ':' + (sec < 10 ? '0' : '') + sec;
+    }
+
+    // ── Report management ──
+    $('btn-load-reports').addEventListener('click', loadReports);
+    async function loadReports() {
+      $('btn-load-reports').disabled = true;
+      $('btn-load-reports').textContent = '⏳ ...';
+      try {
+        const resp = await fetch('/admin/api/clips/reports');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+        renderReports(data.reports || []);
+      } catch (err) {
+        $('report-list').innerHTML = '<span style="color:#C0392B;">❌ 加载失败: ' + err.message + '</span>';
+      } finally {
+        $('btn-load-reports').disabled = false;
+        $('btn-load-reports').textContent = '🔄 加载举报';
+      }
+    }
+
+    function renderReports(reports) {
+      if (!reports.length) {
+        $('report-list').innerHTML = '<span style="color:var(--text-light);">暂无未处理的举报 🎉</span>';
+        return;
+      }
+      $('report-list').replaceChildren(...reports.map(r => {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:0.5rem 0;border-bottom:1px solid #f0f0f0;';
+        row.innerHTML = '<div style="font-size:0.85rem;"><b>切片:</b> ' + (r.clip_id || '').replace(/</g,'&lt;') + '</div>' +
+          '<div style="font-size:0.8rem;color:var(--text-light);"><b>举报者:</b> ' + (r.identity || '').replace(/</g,'&lt;') + ' <b>原因:</b> ' + (r.reason || '(无)').replace(/</g,'&lt;') + '</div>' +
+          '<div style="font-size:0.75rem;color:var(--text-light);">' + (r.created_at || '') + '</div>';
+        const acts = document.createElement('div');
+        acts.style.cssText = 'display:flex;gap:0.35rem;margin-top:0.3rem;';
+        const resBtn = document.createElement('button');
+        resBtn.className = 'btn-file-action btn-rename';
+        resBtn.textContent = '✅ 处理';
+        resBtn.addEventListener('click', async () => {
+          const resp = await fetch('/admin/api/clips/reports/' + r.id + '/resolve', { method: 'POST' });
+          if (resp.ok) loadReports(); else alert('操作失败');
+        });
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn-file-action';
+        delBtn.textContent = '🗑 删除切片';
+        delBtn.style.color = '#C0392B';
+        delBtn.addEventListener('click', async () => {
+          if (!confirm('确认删除切片 ' + r.clip_id + '？')) return;
+          const resp = await fetch('/admin/api/clips/' + encodeURIComponent(r.clip_id), { method: 'DELETE' });
+          if (resp.ok) { loadReports(); loadAdminClips(); } else alert('删除失败');
+        });
+        acts.append(resBtn, delBtn);
+        row.appendChild(acts);
+        return row;
+      }));
+    }
+
+    // ── Batch delete ──
+    $('btn-batch-delete').addEventListener('click', async () => {
+      const id = $('batch-identity').value.trim();
+      if (!id) { alert('请输入用户标识符。'); return; }
+      if (!confirm('确认删除该用户 (' + id + ') 的所有切片和点赞？此操作不可撤销。')) return;
+      try {
+        const resp = await fetch('/admin/api/identity/' + encodeURIComponent(id) + '/clips', { method: 'DELETE' });
+        const data = await resp.json();
+        $('batch-result').hidden = false;
+        $('batch-result').style.color = resp.ok ? '#1E8449' : '#C0392B';
+        $('batch-result').textContent = resp.ok
+          ? '✅ 已删除 ' + data.deleted + ' 个切片。'
+          : '❌ 删除失败: ' + (data.error || resp.status);
+      } catch (err) {
+        $('batch-result').hidden = false;
+        $('batch-result').style.color = '#C0392B';
+        $('batch-result').textContent = '❌ 网络错误: ' + err.message;
+      }
+    });
+
+    function $(id) { return document.getElementById(id); }
+    // Override the existing loadFiles to also update the proxy section
+    const _origLoadFiles = loadFiles;
+    loadFiles = async function() {
+      await _origLoadFiles();
+      // After files load, update proxy section
+      try {
+        const resp = await fetch('/admin/api/files');
+        if (resp.ok) {
+          const data = await resp.json();
+          updateProxySection(data.files || []);
+        }
+      } catch (_) {}
+    };
   </script>
 </body>
 </html>

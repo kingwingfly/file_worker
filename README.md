@@ -45,6 +45,15 @@ That is the whole configuration — no secrets store, and no R2 S3 API token. If
 you set one up for an earlier version of this worker, revoke it: nothing reads it
 any more, and it granted far more than the R2 binding does.
 
+Additionally, set the identity signing secret before deploying:
+
+```bash
+npx wrangler secret put IDENTITY_SECRET
+# Paste a random base64 string, e.g. from: openssl rand -base64 32
+```
+
+Without this, `/api/identity` and all clip/like/report endpoints will return 500.
+
 ### 4. Apply D1 migrations
 
 ```bash
@@ -66,6 +75,15 @@ npx wrangler deploy
 | GET | `/api/files?filter=&offset=&limit=` | List files from D1 |
 | GET | `/api/file/{key}` | Serve file from R2 (preview) |
 | GET | `/api/file/{key}?download=1` | Download file |
+| GET | `/api/proxy?file_path=` | List proxy videos for a file |
+| POST | `/api/identity` | Issue signed identity cookie `{nickname}` |
+| GET | `/api/identity/me` | Return current identity or null |
+| GET | `/api/clips?file_path=&sort=likes\|time` | List public clips |
+| POST | `/api/clips` | Create a clip (needs identity cookie) |
+| DELETE | `/api/clips/{id}` | Delete own clip |
+| POST | `/api/clips/{id}/like` | Like a clip (needs identity cookie) |
+| DELETE | `/api/clips/{id}/like` | Unlike a clip |
+| POST | `/api/clips/{id}/report` | Report a clip `{reason}` |
 
 ### Admin (Cloudflare Access JWT)
 
@@ -79,6 +97,16 @@ npx wrangler deploy
 | POST | `/admin/api/files/check-key` | Check whether a display path would collide |
 | POST | `/admin/api/files/rename` | Rename — one D1 `UPDATE`, no R2 work |
 | DELETE | `/admin/api/files/{path}` | Delete file from R2 + D1 |
+| POST | `/admin/api/proxy/start` | Start proxy upload `{file_path, filename, label}` |
+| POST | `/admin/api/proxy/complete` | Finish proxy upload + D1 insert |
+| GET | `/admin/api/proxy?file_path=` | List proxies for a file (admin) |
+| DELETE | `/admin/api/proxy?key=` | Delete a proxy by R2 key |
+| GET | `/admin/api/clips` | List all clips |
+| DELETE | `/admin/api/clips/{id}` | Delete any clip |
+| POST | `/admin/api/clips/{id}/feature` | Toggle featured `{featured: bool}` |
+| GET | `/admin/api/clips/reports` | List unresolved reports |
+| POST | `/admin/api/clips/reports/{id}/resolve` | Resolve a report |
+| DELETE | `/admin/api/identity/{id}/clips` | Batch-delete all clips by identity |
 
 ### Two names per file
 

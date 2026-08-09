@@ -51,6 +51,19 @@ function init() {
   dom.modalDownload?.addEventListener('click', () => {
     if (state.currentPreview) downloadFile(state.currentPreview);
   });
+  dom.modalClipBtn = document.getElementById('modal-clip-btn');
+  dom.clipPanel = document.getElementById('clip-panel');
+  dom.clipPanelList = document.getElementById('clip-panel-list');
+  dom.clipPanelClose = document.getElementById('clip-panel-close');
+  dom.clipPageLink = document.getElementById('clip-page-link');
+
+  dom.modalClipBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleClipPanel();
+  });
+  dom.clipPanelClose?.addEventListener('click', () => {
+    dom.clipPanel.hidden = true;
+  });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.previewOpen) closePreview();
   });
@@ -192,6 +205,12 @@ function openPreview(file) {
 
   const ct = file.content_type || '';
   const url = `/api/file/${encodePath(file.key)}`;
+
+  // Show clip button for video/audio, hide for images
+  if (dom.modalClipBtn) {
+    dom.modalClipBtn.hidden = !(ct.startsWith('video/') || ct.startsWith('audio/'));
+  }
+  if (dom.clipPanel) dom.clipPanel.hidden = true;
 
   if (ct.startsWith('image/')) {
     const img = document.createElement('img');
@@ -432,6 +451,169 @@ function formatFileSize(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   const val = bytes / Math.pow(k, i);
   return `${val.toFixed(i > 0 ? 1 : 0)} ${sizes[i]}`;
+}
+
+// ── Clip panel ──
+let clipIdentity = null;
+
+async function ensureClipIdentity() {
+  if (clipIdentity) return clipIdentity;
+  try {
+    const resp = await fetch('/api/identity/me');
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.identity) { clipIdentity = data.identity; return clipIdentity; }
+    }
+    // No identity — get a silent one
+    const idResp = await fetch('/api/identity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nickname: '' }),
+    });
+    if (idResp.ok) {
+      const data = await idResp.json();
+      clipIdentity = { id: data.id, nickname: '' };
+      return clipIdentity;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function toggleClipPanel() {
+  const show = dom.clipPanel.hidden;
+  dom.clipPanel.hidden = !show;
+  if (show && state.currentPreview) {
+    loadClipPanel(state.currentPreview);
+  }
+}
+
+async function loadClipPanel(file) {
+  dom.clipPanelList.innerHTML = '<div style="text-align:center;padding:1rem;color:var(--text-light);">加载中...</div>';
+  dom.clipPageLink.href = '/clip?file=' + encodeURIComponent(displayPath(file)) +
+    '&key=' + encodeURIComponent(file.key) +
+    '&type=' + ((file.content_type || '').startsWith('audio/') ? 'audio' : 'video');
+
+  try {
+    const resp = await fetch('/api/clips?file_path=' + encodeURIComponent(displayPath(file)) + '&sort=likes&limit=50');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    renderClipPanel(data.clips || []);
+  } catch (err) {
+    dom.clipPanelList.innerHTML = '<div style="text-align:center;padding:1rem;color:#C0392B;">加载失败: ' + err.message + '</div>';
+  }
+}
+
+function renderClipPanel(clips) {
+  if (!clips.length) {
+    dom.clipPanelList.innerHTML = '<div style="text-align:center;padding:1rem;color:var(--text-light);">暂无切片。去<a href="' + dom.clipPageLink.href + '" style="color:var(--pink);">切片页面</a>创建第一个！</div>';
+    return;
+  }
+  dom.clipPanelList.replaceChildren(...clips.map(c => {
+    const card = document.createElement('div');
+    card.style.cssText = 'padding:0.5rem 0.6rem;border-bottom:1px solid #f0f0f0;font-size:0.85rem;';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;gap:0.4rem;margin-bottom:0.2rem;';
+
+    const name = document.createElement('span');
+    name.style.cssText = 'font-weight:600;cursor:pointer;color:var(--pink);';
+    name.textContent = c.name || '未命名';
+    name.addEventListener('click', () => {
+      // Seek the video to clip start time
+      const vid = document.querySelector('#modal-media video');
+      if (vid) vid.currentTime = c.start_time;
+    });
+
+    const time = document.createElement('span');
+    time.style.cssText = 'font-family:monospace;font-size:0.75rem;color:var(--text-light);';
+    time.textContent = fmtTs(c.start_time) + '–' + fmtTs(c.end_time);
+
+    const meta = document.createElement('span');
+    meta.style.cssText = 'font-size:0.73rem;color:var(--text-light);margin-left:auto;';
+    meta.textContent = (c.nickname || '匿名') + ' · ❤️' + (c.like_count || 0);
+
+    if (c.is_featured) {
+      const feat = document.createElement('span');
+      feat.style.cssText = 'font-size:0.65rem;background:#FCF3CF;color:#B7950B;padding:0.1rem 0.3rem;border-radius:999px;font-weight:600;';
+      feat.textContent = '精选';
+      header.appendChild(feat);
+    }
+
+    header.append(name, time, meta);
+
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:0.3rem;';
+
+    const likeBtn = document.createElement('button');
+    likeBtn.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:999px;border:1px solid #e0e0e0;background:white;cursor:pointer;';
+    likeBtn.textContent = '❤️';
+    likeBtn.addEventListener('click', () => clipLike(c.id, likeBtn));
+
+    const dlBtn = document.createElement('button');
+    dlBtn.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:999px;border:1px solid #e0e0e0;background:white;cursor:pointer;';
+    dlBtn.textContent = '⬇';
+    dlBtn.addEventListener('click', () => showClipExport(c));
+
+    actions.append(likeBtn, dlBtn);
+    card.append(header, actions);
+    return card;
+  }));
+}
+
+async function clipLike(clipId, btn) {
+  await ensureClipIdentity();
+  if (!clipIdentity) return;
+  btn.disabled = true;
+  try {
+    let resp = await fetch('/api/clips/' + encodeURIComponent(clipId) + '/like', { method: 'DELETE' });
+    if (resp.status === 404) {
+      resp = await fetch('/api/clips/' + encodeURIComponent(clipId) + '/like', { method: 'POST' });
+    }
+    if (resp.ok && state.currentPreview) loadClipPanel(state.currentPreview);
+  } catch (_) {} finally { btn.disabled = false; }
+}
+
+function showClipExport(c) {
+  const file = state.currentPreview;
+  if (!file) return;
+  const start = c.start_time || 0;
+  const dur = (c.end_time || 0) - start;
+  const name = (c.name || 'clip') + '.mp4';
+  const cmd = 'ffmpeg -ss ' + start + ' -i "' + location.origin + '/api/file/' +
+    encodePath(file.key) + '" -t ' + dur.toFixed(1) + ' -c copy "' + name + '"';
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:10001;';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  const dlg = document.createElement('div');
+  dlg.style.cssText = 'background:white;border-radius:12px;padding:1.25rem;max-width:520px;width:90vw;box-shadow:0 8px 30px rgba(0,0,0,0.2);';
+  dlg.innerHTML = '<h3 style="margin-bottom:0.5rem;">⬇ ' + (c.name || '切片').replace(/</g,'&lt;') + '</h3>' +
+    '<p style="font-size:0.8rem;color:#7A7A7A;margin-bottom:0.5rem;">ffmpeg 命令（下载并裁剪高质量原片）：</p>' +
+    '<pre style="background:#1a1a1a;color:#0f0;padding:0.6rem;border-radius:6px;font-size:0.75rem;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:8rem;overflow-y:auto;">' + cmd.replace(/</g,'&lt;') + '</pre>' +
+    '<p style="font-size:0.75rem;color:#7A7A7A;margin-bottom:0.75rem;">需要 <code>ffmpeg</code>。-c copy 不重新编码，最快且无损。</p>' +
+    '<div style="display:flex;gap:0.4rem;">' +
+    '<button id="cp-cmd" style="padding:0.4rem 0.8rem;border-radius:999px;border:none;background:#B5E8F7;cursor:pointer;font-size:0.8rem;">📋 复制</button>' +
+    '<button id="close-dlg" style="padding:0.4rem 0.8rem;border-radius:999px;border:none;background:#f0f0f0;cursor:pointer;font-size:0.8rem;">关闭</button>' +
+    '</div>';
+
+  overlay.appendChild(dlg);
+  document.body.appendChild(overlay);
+
+  dlg.querySelector('#cp-cmd').addEventListener('click', () => {
+    navigator.clipboard.writeText(cmd).then(() => {
+      const b = dlg.querySelector('#cp-cmd');
+      b.textContent = '✅ 已复制!';
+      setTimeout(() => { b.textContent = '📋 复制'; }, 2000);
+    }).catch(() => alert('复制失败，请手动复制。'));
+  });
+  dlg.querySelector('#close-dlg').addEventListener('click', () => overlay.remove());
+}
+
+function fmtTs(s) {
+  if (s == null || isNaN(s)) return '0:00';
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return m + ':' + (sec < 10 ? '0' : '') + sec;
 }
 
 // ── Start ──
