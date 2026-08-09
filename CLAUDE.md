@@ -143,7 +143,14 @@ which then keeps the screen awake forever with nothing holding a reference to
 release it.
 
 Acquisition is anchored to the click handlers, not to `doMultipartUpload` —
-that runs after the check-key round trip, past any transient activation. The
+that runs after the check-key round trip, past any transient activation.
+**Safari enforces this**: `navigator.wakeLock.request('screen')` fails with
+`NotAllowedError` from the console and succeeds from a click handler, on the
+same page with Low Power Mode off. The corollary is that the `visibilitychange`
+re-acquire can never succeed on Safari, so a document-level capture-phase
+`click` listener re-takes the lock on the next gesture whenever an upload is
+running without one. Both recovery paths log at `debug`, not `warn` — they are
+expected to fail routinely. The
 duplicate-name dialog releases the lock while it waits for an answer and the
 overwrite button re-takes it on its own gesture; `wakeLockWanted` covers the
 case where a release lands while a request is still in flight, which would

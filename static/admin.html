@@ -475,10 +475,11 @@
         // that tells them apart, plus which call site asked.
         const detail =
           `site=${site} visibility=${document.visibilityState} secure=${isSecureContext}`;
-        if (site === 'visibilitychange') {
-          // Known WebKit behaviour: the document can report 'visible' before it
-          // is fully active again, so a re-acquire fails routinely on Safari.
-          // The on-page hint already covers it — don't shout in the console.
+        if (site === 'visibilitychange' || site === 'gesture') {
+          // Both are recovery attempts that are *expected* to fail sometimes —
+          // 'visibilitychange' always does on Safari, which has no gesture
+          // there, and 'gesture' fires on every click while a lock is missing.
+          // The on-page hint covers it; don't shout in the console.
           console.debug(`Wake lock not re-acquired (${err.name}) — ${detail}`);
         } else {
           console.warn(`Wake lock refused (${err.name}: ${err.message}) — ${detail}`);
@@ -514,6 +515,16 @@
       if (!uploadInProgress || document.visibilityState !== 'visible') return;
       acquireWakeLock('visibilitychange').then(setWakeHint);
     });
+
+    // Safari grants a lock only inside a user gesture (verified: the same
+    // request fails from the console and succeeds from a click handler), so the
+    // re-acquire above cannot work there — a single tab switch would end the
+    // lock for the rest of the upload. Take the next click anywhere as the
+    // gesture. Capture phase, so a handler that stops propagation can't hide it.
+    document.addEventListener('click', () => {
+      if (!uploadInProgress || wakeLock) return;
+      acquireWakeLock('gesture').then(setWakeHint);
+    }, true);
 
     // Closing the tab mid-upload kills the transfer and strands the multipart
     // upload in R2 — the abort call lives in doMultipartUpload's catch, which
