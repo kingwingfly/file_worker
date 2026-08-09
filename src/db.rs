@@ -78,3 +78,31 @@ pub async fn get_file(ctx: &worker::RouteContext<()>, key: &str) -> Result<Optio
         .await?;
     Ok(result)
 }
+
+/// Check if a file key exists in D1
+pub async fn check_file_exists(ctx: &worker::RouteContext<()>, key: &str) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare("SELECT COUNT(*) as cnt FROM files WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(key))])?
+        .first::<i64>(Some("cnt"))
+        .await?;
+    Ok(result.unwrap_or(0) > 0)
+}
+
+/// Rename a file in D1 — update the key
+pub async fn rename_file(
+    ctx: &worker::RouteContext<()>,
+    old_key: &str,
+    new_key: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare("UPDATE files SET key = ? WHERE key = ?")
+        .bind(&[
+            JsValue::from(&D1Type::Text(new_key)),
+            JsValue::from(&D1Type::Text(old_key)),
+        ])?
+        .run()
+        .await?;
+    Ok(())
+}

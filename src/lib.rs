@@ -178,6 +178,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 .as_str()
                 .unwrap_or("application/octet-stream");
             let custom_path = body["path"].as_str().filter(|s| !s.is_empty());
+            let overwrite = body["overwrite"].as_bool().unwrap_or(false);
 
             let key = if let Some(path) = custom_path {
                 if path.ends_with('/') {
@@ -189,6 +190,19 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 let ts = Date::now().as_millis();
                 format!("uploads/{}/{}", ts / 86400000, filename)
             };
+
+            // Check for duplicate unless overwrite flag is set
+            if !overwrite && db::check_file_exists(&ctx, &key).await? {
+                return Ok(
+                    Response::from_json(&serde_json::json!({
+                        "error": "duplicate",
+                        "key": key,
+                        "message": "A file with this key already exists.",
+                    }))?
+                    .with_status(409)
+                    .with_headers(cors::headers()?),
+                );
+            }
 
             let bucket = ctx.bucket("FILE_BUCKET")?;
             let metadata = HttpMetadata {
@@ -350,6 +364,114 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
             Ok(Response::from_json(&serde_json::json!({"ok": true, "deleted": deleted_key}))?
                 .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/files/rename — rename a file (R2 copy + delete + D1 update)
+        .post_async("/admin/api/files/rename", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Rename by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let old_key = body["old_key"]
+                .as_str()
+                .ok_or_else(|| worker::Error::RustError("missing old_key".into()))?;
+            let new_key = body["new_key"]
+                .as_str()
+                .ok_or_else(|| worker::Error::RustError("missing new_key".into()))?;
+
+            if old_key.is_empty() || new_key.is_empty() {
+                return Ok(Response::error("Bad Request: empty key", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            if old_key == new_key {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "ok": true,
+                    "key": new_key,
+                }))?
+                .with_headers(cors::headers()?));
+            }
+
+            // Check target key doesn't already exist
+            if db::check_file_exists(&ctx, new_key).await? {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "duplicate",
+                    "message": "目标文件名已存在。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+
+            // Copy object in R2: get old → put new → delete old
+            let old_obj = bucket.get(old_key).execute().await?;
+            let old_obj = old_obj.ok_or_else(|| {
+                worker::Error::RustError("source file not found in storage".into())
+            })?;
+
+            let body = old_obj
+                .body()
+                .ok_or_else(|| worker::Error::RustError("source file has no body".into()))?;
+
+            let body_bytes = body.bytes().await?;
+
+            let content_type = old_obj
+                .http_metadata()
+                .content_type
+                .as_deref()
+                .unwrap_or("application/octet-stream")
+                .to_string();
+
+            // Put the object with the new key
+            let metadata = HttpMetadata {
+                content_type: Some(content_type.clone()),
+                ..Default::default()
+            };
+            bucket
+                .put(new_key, body_bytes)
+                .http_metadata(metadata)
+                .execute()
+                .await?;
+
+            // Delete the old object
+            bucket.delete(old_key).await?;
+
+            // Update D1 record
+            db::rename_file(&ctx, old_key, new_key).await?;
+
+            console_log!("Renamed: {} -> {}", old_key, new_key);
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "old_key": old_key,
+                "new_key": new_key,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/files/check-key — check if a key would collide before upload
+        .post_async("/admin/api/files/check-key", |mut req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+
+            let body: serde_json::Value = req.json().await?;
+            let filename = body["filename"].as_str().unwrap_or("unnamed");
+            let custom_path = body["path"].as_str().filter(|s| !s.is_empty());
+
+            let key = if let Some(path) = custom_path {
+                if path.ends_with('/') {
+                    format!("{}{}", path, filename)
+                } else {
+                    path.to_string()
+                }
+            } else {
+                let ts = Date::now().as_millis();
+                format!("uploads/{}/{}", ts / 86400000, filename)
+            };
+
+            let exists = db::check_file_exists(&ctx, &key).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "key": key,
+                "exists": exists,
+            }))?
+            .with_headers(cors::headers()?))
         })
         // Fallback: serve static assets via Fetcher
         .get_async("/*path", |req, ctx| async move {

@@ -174,7 +174,13 @@
       text-align: right;
     }
 
-    .btn-delete {
+    .file-list-actions {
+      display: flex;
+      gap: 0.35rem;
+      flex-shrink: 0;
+    }
+
+    .btn-file-action {
       background: none;
       border: 1px solid #e0e0e0;
       color: var(--text-light);
@@ -187,7 +193,96 @@
       white-space: nowrap;
     }
 
-    .btn-delete:hover { background: #FADBD8; color: #C0392B; border-color: #F5B7B1; }
+    .btn-file-action:hover { background: #FADBD8; color: #C0392B; border-color: #F5B7B1; }
+
+    .btn-rename:hover { background: #D5F5E3; color: #1E8449; border-color: #A9DFBF; }
+
+    .rename-dialog-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+
+    .rename-dialog {
+      background: var(--white);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      min-width: 320px;
+      max-width: 90vw;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.18);
+    }
+
+    .rename-dialog h3 {
+      margin-bottom: 0.75rem;
+      font-size: 1.1rem;
+    }
+
+    .rename-dialog input {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      border: 2px solid var(--soft-blue);
+      border-radius: var(--radius-sm);
+      font-size: 0.95rem;
+    }
+
+    .rename-dialog input:focus {
+      border-color: var(--pink);
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(255, 182, 193, 0.2);
+    }
+
+    .rename-dialog .rename-hint {
+      font-size: 0.8rem;
+      color: var(--text-light);
+      margin-top: 0.35rem;
+    }
+
+    .rename-dialog-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1rem;
+      justify-content: flex-end;
+    }
+
+    .rename-dialog-actions button {
+      padding: 0.5rem 1.2rem;
+      border-radius: 999px;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .btn-rename-confirm {
+      background: var(--pink);
+      color: var(--white);
+    }
+
+    .btn-rename-confirm:hover { background: #FF9AAF; }
+    .btn-rename-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-rename-cancel {
+      background: #f0f0f0;
+      color: var(--text);
+    }
+
+    .btn-rename-cancel:hover { background: #e0e0e0; }
+
+    .duplicate-warning {
+      background: #FCF3CF;
+      border: 1px solid #F9E79F;
+      border-radius: var(--radius-sm);
+      padding: 0.75rem 1rem;
+      margin-top: 0.75rem;
+      font-size: 0.9rem;
+      display: none;
+    }
+
+    .duplicate-warning.show { display: block; }
 
     .admin-header {
       display: flex;
@@ -243,6 +338,14 @@
       <button class="btn-upload" id="upload-btn" disabled>
         🚀 上传
       </button>
+
+      <div class="duplicate-warning" id="dup-warning" hidden>
+        ⚠️ 文件 "<span id="dup-key"></span>" 已存在。是否覆盖？
+        <div style="margin-top:0.5rem;display:flex;gap:0.5rem;">
+          <button class="btn-rename-confirm" id="btn-overwrite" style="font-size:0.85rem;padding:0.4rem 1rem;">覆盖</button>
+          <button class="btn-rename-cancel" id="btn-cancel-overwrite" style="font-size:0.85rem;padding:0.4rem 1rem;">取消</button>
+        </div>
+      </div>
 
       <div class="upload-progress" hidden id="progress-wrapper">
         <div class="upload-progress-bar" id="progress-bar" style="width:0%"></div>
@@ -311,19 +414,80 @@
 
     // Upload — multipart for large files
     const CHUNK_SIZE = 25 * 1024 * 1024; // 25 MB per chunk
+    const dupWarning = document.getElementById('dup-warning');
+    const dupKeyEl = document.getElementById('dup-key');
+    const btnOverwrite = document.getElementById('btn-overwrite');
+    const btnCancelOverwrite = document.getElementById('btn-cancel-overwrite');
+    let pendingOverwriteFile = null;
+    let pendingOverwritePath = null;
 
     uploadBtn.addEventListener('click', () => {
       if (!selectedFile) return;
-      doMultipartUpload(selectedFile, customPath.value.trim());
+      checkDuplicateThenUpload(selectedFile, customPath.value.trim());
     });
 
-    async function doMultipartUpload(file, path) {
+    btnOverwrite.addEventListener('click', () => {
+      dupWarning.hidden = true;
+      if (pendingOverwriteFile) {
+        doMultipartUpload(pendingOverwriteFile, pendingOverwritePath, true);
+        pendingOverwriteFile = null;
+        pendingOverwritePath = null;
+      }
+    });
+
+    btnCancelOverwrite.addEventListener('click', () => {
+      dupWarning.hidden = true;
+      pendingOverwriteFile = null;
+      pendingOverwritePath = null;
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = '🚀 上传';
+    });
+
+    async function checkDuplicateThenUpload(file, path) {
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = '⏳ 检查重名...';
+      uploadResult.hidden = true;
+      dupWarning.hidden = true;
+
+      try {
+        const checkResp = await fetch('/admin/api/files/check-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            path: path || undefined,
+          }),
+        });
+        if (!checkResp.ok) {
+          // If check fails, proceed anyway — server will catch duplicates
+          doMultipartUpload(file, path, false);
+          return;
+        }
+        const checkData = await checkResp.json();
+
+        if (checkData.exists) {
+          dupKeyEl.textContent = checkData.key;
+          dupWarning.hidden = false;
+          pendingOverwriteFile = file;
+          pendingOverwritePath = path;
+          uploadBtn.textContent = '🚀 上传';
+        } else {
+          doMultipartUpload(file, path, false);
+        }
+      } catch (_) {
+        // Check failed — proceed anyway
+        doMultipartUpload(file, path, false);
+      }
+    }
+
+    async function doMultipartUpload(file, path, overwrite) {
       uploadBtn.disabled = true;
       uploadBtn.textContent = '⏳ 准备上传...';
       progressWrapper.hidden = false;
       progressBar.style.width = '0%';
       document.getElementById('progress-text').textContent = '';
       uploadResult.hidden = true;
+      dupWarning.hidden = true;
 
       let uploadId = null;
       let key = null;
@@ -338,9 +502,15 @@
             filename: file.name,
             content_type: file.type || 'application/octet-stream',
             path: path || undefined,
+            overwrite: overwrite || false,
           }),
         });
         if (!startResp.ok) {
+          const errData = await startResp.json().catch(() => ({}));
+          if (startResp.status === 409 && errData.error === 'duplicate') {
+            showResult(false, `❌ 文件已存在: ${errData.key}。请刷新页面后重试。`);
+            return;
+          }
           throw new Error(`Start failed: ${startResp.status}`);
         }
         const startData = await startResp.json();
@@ -483,7 +653,10 @@
         <li class="file-list-item">
           <span class="file-list-name" title="${escapeHtml(f.key)}">✨ ${escapeHtml(f.key)}</span>
           <span class="file-list-size">${formatSize(f.size)}</span>
-          <button class="btn-delete" onclick="deleteFile('${escapeAttr(f.key)}')">🗑 删除</button>
+          <div class="file-list-actions">
+            <button class="btn-file-action btn-rename" onclick="renameFile('${escapeAttr(f.key)}')">✏️ 重命名</button>
+            <button class="btn-file-action" onclick="deleteFile('${escapeAttr(f.key)}')">🗑 删除</button>
+          </div>
         </li>
       `).join('');
     }
@@ -500,6 +673,97 @@
       } catch (err) {
         alert('网络错误: ' + err.message);
       }
+    }
+
+    // ── Rename ──
+    function renameFile(oldKey) {
+      // Extract just the filename portion for the default value
+      const filename = oldKey.split('/').pop() || oldKey;
+
+      // Build a simple modal
+      const overlay = document.createElement('div');
+      overlay.className = 'rename-dialog-overlay';
+      overlay.innerHTML = `
+        <div class="rename-dialog">
+          <h3>✏️ 重命名文件</h3>
+          <div style="font-size:0.85rem;color:var(--text-light);margin-bottom:0.5rem;">
+            原路径: ${escapeHtml(oldKey)}
+          </div>
+          <label style="font-weight:500;font-size:0.9rem;">新文件名</label>
+          <input type="text" id="rename-input" value="${escapeAttr(filename)}" autofocus>
+          <div class="rename-hint">只改文件名，保留目录路径。输入完整路径可移动到其他目录。</div>
+          <div class="rename-dialog-actions">
+            <button class="btn-rename-cancel">取消</button>
+            <button class="btn-rename-confirm">确认重命名</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+
+      const input = overlay.querySelector('#rename-input');
+      const confirmBtn = overlay.querySelector('.btn-rename-confirm');
+      const cancelBtn = overlay.querySelector('.btn-rename-cancel');
+
+      // Focus and select the name part (without extension)
+      const dotIdx = filename.lastIndexOf('.');
+      if (dotIdx > 0) {
+        input.setSelectionRange(0, dotIdx);
+      } else {
+        input.select();
+      }
+
+      async function doRename() {
+        const newName = input.value.trim();
+        if (!newName) { alert('文件名不能为空'); return; }
+        if (newName === filename) { closeDialog(); return; }
+
+        // Build new key: replace the last segment (filename) with new name
+        const parts = oldKey.split('/');
+        parts[parts.length - 1] = newName;
+        const newKey = parts.join('/');
+
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = '⏳ ...';
+
+        try {
+          const resp = await fetch('/admin/api/files/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ old_key: oldKey, new_key: newKey }),
+          });
+          const data = await resp.json();
+          if (resp.ok) {
+            closeDialog();
+            loadFiles();
+          } else {
+            alert('重命名失败: ' + (data.message || resp.status));
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = '确认重命名';
+          }
+        } catch (err) {
+          alert('网络错误: ' + err.message);
+          confirmBtn.disabled = false;
+          confirmBtn.textContent = '确认重命名';
+        }
+      }
+
+      function closeDialog() {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+      }
+
+      function onKey(e) {
+        if (e.key === 'Escape') closeDialog();
+        if (e.key === 'Enter') doRename();
+      }
+
+      confirmBtn.addEventListener('click', doRename);
+      cancelBtn.addEventListener('click', closeDialog);
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeDialog();
+      });
+      document.addEventListener('keydown', onKey);
+      input.focus();
     }
 
     function encodePath(key) {
