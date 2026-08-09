@@ -480,6 +480,7 @@
           releaseWakeLock();
           return false;
         }
+        console.debug(`Wake lock held (site=${site})`);
         return true;
       } catch (err) {
         // Safari denies with a bare NotAllowedError for several unrelated
@@ -518,10 +519,23 @@
       } else if (held) {
         msg = '☕ 已阻止设备休眠';
       } else {
-        msg = '⚠️ 浏览器拒绝阻止休眠，请勿让设备休眠';
+        // Not "refused". A missing lock here is usually recoverable — Safari
+        // only grants one inside a user gesture, and the capture-phase click
+        // listener takes the next one and upgrades this message. Say what the
+        // admin can do about it rather than announcing a permanent failure.
+        msg = '⚠️ 尚未阻止休眠，点击页面任意处重试';
       }
       wakeHint.textContent = msg + ' · 请勿关闭此页面';
       wakeHint.hidden = false;
+    }
+
+    // Report the state a gesture-time request reached, without issuing a new
+    // request of our own.
+    async function settleWakeHint() {
+      if (wakeLockPending) {
+        try { await wakeLockPending; } catch (_) { /* setWakeHint reports it */ }
+      }
+      setWakeHint(!!wakeLock);
     }
 
     document.addEventListener('visibilitychange', () => {
@@ -625,6 +639,7 @@
     btnResume.addEventListener('click', () => {
       const s = loadSession();
       if (!s || !resumeFile || !sessionMatches(s, resumeFile)) {
+        releaseWakeLock(); // no upload is starting; don't hold the screen awake
         showResult(false, '❌ 所选文件与未完成的上传不匹配，无法续传。');
         return;
       }
@@ -655,6 +670,14 @@
     const btnCancelOverwrite = document.getElementById('btn-cancel-overwrite');
     let pendingOverwriteFile = null;
     let pendingOverwritePath = null;
+
+    // pointerdown is the earliest event carrying transient activation, and it
+    // fires well before the click handler's own request. Costs nothing when
+    // that one would have succeeded anyway, and widens the window when it
+    // wouldn't — the shared in-flight guard means only one request is made.
+    uploadBtn.addEventListener('pointerdown', () => {
+      if (selectedFile) acquireWakeLock('pointerdown');
+    });
 
     uploadBtn.addEventListener('click', () => {
       if (!selectedFile) return;
@@ -817,7 +840,12 @@
       dupWarning.hidden = true;
 
       uploadInProgress = true;
-      acquireWakeLock('upload').then(setWakeHint);
+      // Deliberately does NOT request a lock. runUpload is reached after the
+      // check-key and /upload/start round trips, so it has no user activation
+      // left and WebKit refuses — which would overwrite a lock the click
+      // already secured with a spurious "refused" hint. Report the click's
+      // result instead, waiting for it if it is still in flight.
+      settleWakeHint();
 
       // Always the session's chunk size, never CHUNK_SIZE. R2 requires every
       // part but the last to be identically sized, so raising the constant
