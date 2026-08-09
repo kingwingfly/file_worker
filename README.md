@@ -40,6 +40,11 @@ Edit `wrangler.toml` with your resource IDs:
 - `[[kv_namespaces]]` — your KV namespace id (for JWKS cache)
 - `[vars].CF_ACCESS_TEAM_DOMAIN` — your Cloudflare Access team domain
 - `[vars].CF_ACCESS_AUD` — your Cloudflare Access application audience tag
+- `[vars].CF_ACCOUNT_ID` — your account ID (R2 S3 endpoint host)
+- `[vars].R2_BUCKET_NAME` — must equal `[[r2_buckets]].bucket_name`
+- `[[secrets_store_secrets]]` — R2 S3 API token as `CLIENT_ID` (Access Key ID)
+  and `CLIENT_SECRET` (Secret Access Key), used only by the rename path.
+  Scope the token to Object Read & Write on this one bucket.
 
 ### 4. Apply D1 migrations
 
@@ -68,8 +73,17 @@ npx wrangler deploy
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/admin/api/files` | List all files |
-| POST | `/admin/api/upload` | Upload file (multipart: `file` + optional `path`) |
+| POST | `/admin/api/upload/start` | Begin a multipart upload → `{upload_id, key}` |
+| PUT | `/admin/api/upload/part?upload_id=&key=&n=` | Upload one chunk (raw bytes) |
+| POST | `/admin/api/upload/complete?upload_id=&key=` | Finish upload + D1 insert |
+| DELETE | `/admin/api/upload?upload_id=&key=` | Abort a multipart upload |
+| POST | `/admin/api/files/check-key` | Check whether a key would collide |
+| POST | `/admin/api/files/rename` | Rename (S3 CopyObject + D1 update + delete old) |
 | DELETE | `/admin/api/files/{key}` | Delete file from R2 + D1 |
+
+Non-GET calls to `/admin/api/*` require an `Origin` header matching the worker's
+own origin (CSRF defence — admin auth is a cookie). The admin page satisfies this
+automatically; scripted clients must send `Origin` explicitly.
 
 ## 📁 Structure
 

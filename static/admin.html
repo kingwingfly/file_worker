@@ -635,9 +635,11 @@
         const data = await resp.json();
         renderFileList(data.files || []);
       } catch (err) {
-        fileListEl.innerHTML = `<li class="file-list-item" style="justify-content:center; color: #C0392B;">
-          ❌ 加载失败: ${err.message}
-        </li>`;
+        const li = document.createElement('li');
+        li.className = 'file-list-item';
+        li.style.cssText = 'justify-content:center; color: #C0392B;';
+        li.textContent = '❌ 加载失败: ' + err.message;
+        fileListEl.replaceChildren(li);
       }
     }
 
@@ -649,16 +651,39 @@
         return;
       }
 
-      fileListEl.innerHTML = files.map(f => `
-        <li class="file-list-item">
-          <span class="file-list-name" title="${escapeHtml(f.key)}">✨ ${escapeHtml(f.key)}</span>
-          <span class="file-list-size">${formatSize(f.size)}</span>
-          <div class="file-list-actions">
-            <button class="btn-file-action btn-rename" onclick="renameFile('${escapeAttr(f.key)}')">✏️ 重命名</button>
-            <button class="btn-file-action" onclick="deleteFile('${escapeAttr(f.key)}')">🗑 删除</button>
-          </div>
-        </li>
-      `).join('');
+      // Built with DOM APIs, not string interpolation: keys are user-controlled
+      // (filename / custom path) and an inline onclick="...'${key}'..." can be
+      // escaped out of with an HTML entity such as &#39;.
+      fileListEl.replaceChildren(...files.map(f => {
+        const li = document.createElement('li');
+        li.className = 'file-list-item';
+
+        const name = document.createElement('span');
+        name.className = 'file-list-name';
+        name.title = f.key;
+        name.textContent = '✨ ' + f.key;
+
+        const size = document.createElement('span');
+        size.className = 'file-list-size';
+        size.textContent = formatSize(f.size);
+
+        const actions = document.createElement('div');
+        actions.className = 'file-list-actions';
+
+        const renameBtn = document.createElement('button');
+        renameBtn.className = 'btn-file-action btn-rename';
+        renameBtn.textContent = '✏️ 重命名';
+        renameBtn.addEventListener('click', () => renameFile(f.key));
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'btn-file-action';
+        delBtn.textContent = '🗑 删除';
+        delBtn.addEventListener('click', () => deleteFile(f.key));
+
+        actions.append(renameBtn, delBtn);
+        li.append(name, size, actions);
+        return li;
+      }));
     }
 
     async function deleteFile(key) {
@@ -683,14 +708,14 @@
       // Build a simple modal
       const overlay = document.createElement('div');
       overlay.className = 'rename-dialog-overlay';
+      // No key interpolation into markup — `oldKey`/`filename` go in via
+      // textContent/.value so an HTML entity in the name can't break out.
       overlay.innerHTML = `
         <div class="rename-dialog">
           <h3>✏️ 重命名文件</h3>
-          <div style="font-size:0.85rem;color:var(--text-light);margin-bottom:0.5rem;">
-            原路径: ${escapeHtml(oldKey)}
-          </div>
+          <div class="rename-oldpath" style="font-size:0.85rem;color:var(--text-light);margin-bottom:0.5rem;"></div>
           <label style="font-weight:500;font-size:0.9rem;">新文件名</label>
-          <input type="text" id="rename-input" value="${escapeAttr(filename)}" autofocus>
+          <input type="text" id="rename-input" autofocus>
           <div class="rename-hint">只改文件名，保留目录路径。输入完整路径可移动到其他目录。</div>
           <div class="rename-dialog-actions">
             <button class="btn-rename-cancel">取消</button>
@@ -698,9 +723,11 @@
           </div>
         </div>
       `;
+      overlay.querySelector('.rename-oldpath').textContent = '原路径: ' + oldKey;
       document.body.appendChild(overlay);
 
       const input = overlay.querySelector('#rename-input');
+      input.value = filename;
       const confirmBtn = overlay.querySelector('.btn-rename-confirm');
       const cancelBtn = overlay.querySelector('.btn-rename-cancel');
 
@@ -778,15 +805,6 @@
       return (bytes / Math.pow(k, i)).toFixed(i > 0 ? 1 : 0) + ' ' + sizes[i];
     }
 
-    function escapeHtml(str) {
-      const div = document.createElement('div');
-      div.textContent = str;
-      return div.innerHTML;
-    }
-
-    function escapeAttr(str) {
-      return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-    }
 
     // Initial load
     loadFiles();

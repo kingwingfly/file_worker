@@ -80,7 +80,8 @@ async function fetchFiles() {
     state.offset += data.limit;
 
     renderGallery();
-    updateLoadMore(data.files.length < data.limit);
+    // A full page came back → there is probably more. A short page is the last one.
+    updateLoadMore(data.files.length >= data.limit);
     updateEmptyState();
   } catch (err) {
     console.error('Failed to fetch:', err);

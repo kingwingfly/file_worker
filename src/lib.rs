@@ -1,15 +1,92 @@
 use percent_encoding::percent_decode_str;
 use worker::*;
 
+/// Build an RFC 6266 / RFC 5987 `Content-Disposition` value.
+///
+/// Header values are ByteStrings: any code point above U+00FF throws when set,
+/// and a raw `"` or `\` in the filename would break out of the quoted-string.
+/// So we send an ASCII-sanitised `filename=` for legacy clients plus a
+/// percent-encoded `filename*=UTF-8''…` that every modern browser prefers.
+fn content_disposition(filename: &str) -> String {
+    let ascii_fallback: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && !c.is_ascii_control() && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ascii_fallback = if ascii_fallback.trim().is_empty() {
+        "download".to_string()
+    } else {
+        ascii_fallback
+    };
+
+    let encoded =
+        percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC)
+            .to_string();
+
+    format!("attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}")
+}
+
 mod auth;
 mod cors;
 mod db;
+mod s3_copy;
 
 /// URL-decode a percent-encoded key from the URL path.
 /// The URL parser preserves `%2F` (encoded `/`) in pathnames, so keys
 /// containing slashes arrive still-encoded and must be decoded for R2/D1.
 fn decode_key(encoded: &str) -> String {
     percent_decode_str(encoded).decode_utf8_lossy().into_owned()
+}
+
+/// Clamp a client-supplied Content-Type to the media types this gallery serves.
+///
+/// The stored type is echoed back verbatim on the public `/api/file/*key` route,
+/// which lives on the same origin as `/admin`. Letting a caller store
+/// `text/html` (or `image/svg+xml`, which scripts) turns any upload into stored
+/// XSS — `X-Content-Type-Options` does not help when the declared type *is*
+/// active. The upload UI only offers image/video/audio anyway.
+fn sanitize_content_type(raw: &str) -> String {
+    let base = raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+
+    let allowed = matches!(base.split('/').next(), Some("image" | "video" | "audio"))
+        && base != "image/svg+xml"
+        && !base.contains(|c: char| c.is_ascii_control());
+
+    if allowed {
+        base
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
+/// Reject cross-site state-changing calls to the admin API.
+///
+/// Admin routes authenticate on the `CF_Authorization` cookie alone, and
+/// `req.json()` ignores Content-Type — so a plain cross-origin form POST
+/// (`text/plain`, no preflight) would otherwise arrive fully authenticated.
+/// Browsers always send `Origin` on non-GET requests, so anything without a
+/// matching one is not our own admin page. Non-browser callers must send it too.
+fn reject_cross_site_admin(req: &Request) -> Result<Option<Response>> {
+    let url = req.url()?;
+    if !url.path().starts_with("/admin/api/") {
+        return Ok(None);
+    }
+    if matches!(req.method(), Method::Get | Method::Head | Method::Options) {
+        return Ok(None);
+    }
+
+    let expected = url.origin().ascii_serialization();
+    match req.headers().get("Origin")?.as_deref() {
+        Some(origin) if origin == expected => Ok(None),
+        _ => Ok(Some(
+            Response::error("Forbidden: cross-site request", 403)?.with_headers(cors::headers()?),
+        )),
+    }
 }
 
 /// Parse an HTTP `Range: bytes=...` header value into an R2 Range.
@@ -30,16 +107,24 @@ fn parse_range(header: &str) -> Option<worker::Range> {
     if start > end {
         return None;
     }
-    Some(worker::Range::OffsetWithLength { offset: start, length: end - start + 1 })
+    // `end - start + 1` overflows on e.g. `bytes=0-18446744073709551615`.
+    let length = end.checked_sub(start)?.checked_add(1)?;
+    Some(worker::Range::OffsetWithLength { offset: start, length })
 }
 
 /// Compute Content-Range bounds from the requested Range and total file size.
 fn range_bounds(range: worker::Range, total: u64) -> (u64, u64) {
     let last = total.saturating_sub(1);
     match range {
-        worker::Range::OffsetWithLength { offset, length } => (offset, (offset + length - 1).min(last)),
+        worker::Range::OffsetWithLength { offset, length } => (
+            offset,
+            offset
+                .saturating_add(length)
+                .saturating_sub(1)
+                .min(last),
+        ),
         worker::Range::OffsetToEnd { offset } => (offset, last),
-        worker::Range::Prefix { length } => (0, (length - 1).min(last)),
+        worker::Range::Prefix { length } => (0, length.saturating_sub(1).min(last)),
         worker::Range::Suffix { suffix } => (total.saturating_sub(suffix), last),
     }
 }
@@ -49,6 +134,10 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
     // Handle CORS preflight
     if req.method() == Method::Options {
         return Ok(Response::empty()?.with_headers(cors::headers()?));
+    }
+
+    if let Some(rejection) = reject_cross_site_admin(&req)? {
+        return Ok(rejection);
     }
 
     let router = Router::new();
@@ -104,14 +193,27 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                             if let Some(body) = obj.body() {
                                 let total = obj.size();
                                 let meta = obj.http_metadata();
-                                let ct = meta.content_type.as_deref().unwrap_or("application/octet-stream");
+                                // Sanitise on read too, not just on write: objects
+                                // uploaded before the write-side allowlist existed
+                                // still carry whatever type the client sent.
+                                let ct = sanitize_content_type(meta.content_type.as_deref().unwrap_or_default());
                                 let (rs, re) = range_bounds(r2, total);
 
+                                // `range_bounds` clamps the end to the last byte, so a
+                                // start past EOF (`bytes=5000-` on a 100-byte file)
+                                // yields rs > re. `re - rs + 1` would then wrap to a
+                                // nonsense Content-Length, so answer 416 instead.
+                                let len = match re.checked_sub(rs).and_then(|d| d.checked_add(1)) {
+                                    Some(len) => len,
+                                    None => return Response::error("Range Not Satisfiable", 416),
+                                };
+
                                 let mut headers = Headers::new();
-                                headers.set("Content-Type", ct)?;
+                                headers.set("Content-Type", &ct)?;
                                 headers.set("Accept-Ranges", "bytes")?;
                                 headers.set("Content-Range", &format!("bytes {}-{}/{}", rs, re, total))?;
-                                headers.set("Content-Length", &(re - rs + 1).to_string())?;
+                                headers.set("Content-Length", &len.to_string())?;
+                                headers.set("X-Content-Type-Options", "nosniff")?;
                                 cors::extend_headers(&mut headers)?;
 
                                 return Ok(Response::from_body(body.response_body()?)?
@@ -130,21 +232,24 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                         .ok_or_else(|| worker::Error::RustError("no body".into()))?;
 
                     let meta = object.http_metadata();
-                    let content_type = meta
-                        .content_type
-                        .as_deref()
-                        .unwrap_or("application/octet-stream");
+                    // See the 206 branch: legacy objects predate the write-side
+                    // allowlist, so the stored type is re-checked on every serve.
+                    let content_type =
+                        sanitize_content_type(meta.content_type.as_deref().unwrap_or_default());
 
                     let mut headers = Headers::new();
-                    headers.set("Content-Type", content_type)?;
-                    headers.set("Cache-Control", "public, max-age=31536000, immutable")?;
+                    headers.set("Content-Type", &content_type)?;
+                    // Keys are mutable (upload?overwrite=1, rename), so `immutable`
+                    // + 1 year would pin stale content in browser/edge caches.
+                    headers.set("Cache-Control", "public, max-age=3600")?;
+                    // Content-Type is client-supplied at upload time; never let the
+                    // browser sniff an uploaded blob into an active type.
+                    headers.set("X-Content-Type-Options", "nosniff")?;
+                    headers.set("Accept-Ranges", "bytes")?;
 
                     if is_download {
                         let filename = key.rsplit('/').next().unwrap_or(&key);
-                        headers.set(
-                            "Content-Disposition",
-                            &format!("attachment; filename=\"{}\"", filename),
-                        )?;
+                        headers.set("Content-Disposition", &content_disposition(filename))?;
                     }
 
                     cors::extend_headers(&mut headers)?;
@@ -174,9 +279,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
             let body: serde_json::Value = req.json().await?;
             let filename = body["filename"].as_str().unwrap_or("unnamed");
-            let content_type = body["content_type"]
-                .as_str()
-                .unwrap_or("application/octet-stream");
+            let content_type =
+                sanitize_content_type(body["content_type"].as_str().unwrap_or_default());
             let custom_path = body["path"].as_str().filter(|s| !s.is_empty());
             let overwrite = body["overwrite"].as_bool().unwrap_or(false);
 
@@ -206,7 +310,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
             let bucket = ctx.bucket("FILE_BUCKET")?;
             let metadata = HttpMetadata {
-                content_type: Some(content_type.to_string()),
+                content_type: Some(content_type.clone()),
                 ..Default::default()
             };
             let upload = bucket
@@ -274,9 +378,8 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let parts_json = body["parts"]
                 .as_array()
                 .ok_or_else(|| worker::Error::RustError("missing parts array".into()))?;
-            let content_type = body["content_type"]
-                .as_str()
-                .unwrap_or("application/octet-stream");
+            let content_type =
+                sanitize_content_type(body["content_type"].as_str().unwrap_or_default());
 
             let uploaded_parts: Vec<UploadedPart> = parts_json
                 .iter()
@@ -294,7 +397,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let size = obj.size() as i64;
 
             // Insert record into D1. If this fails, clean up the R2 object.
-            match db::insert_file(&ctx, &key, size, content_type).await {
+            match db::insert_file(&ctx, &key, size, &content_type).await {
                 Ok(()) => {
                     console_log!("Upload complete: key={}, size={}", key, size);
                     Ok(Response::from_json(&serde_json::json!({
@@ -403,41 +506,33 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
             let bucket = ctx.bucket("FILE_BUCKET")?;
 
-            // Copy object in R2: get old → put new → delete old
-            let old_obj = bucket.get(old_key).execute().await?;
-            let old_obj = old_obj.ok_or_else(|| {
-                worker::Error::RustError("source file not found in storage".into())
-            })?;
+            // The D1 check above misses an R2 object with no matching row (an
+            // orphan from a failed insert). CopyObject overwrites unconditionally,
+            // so without this the rename would destroy that object's bytes — and
+            // the rollback below would then delete what was left.
+            if bucket.head(new_key).await?.is_some() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "duplicate",
+                    "message": "目标文件名已存在。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
 
-            let body = old_obj
-                .body()
-                .ok_or_else(|| worker::Error::RustError("source file has no body".into()))?;
+            // Order matters: copy → D1 → delete old.
+            // If D1 fails we still have both objects and the row points at a
+            // live key, so the user can retry. Deleting first would leave D1
+            // pointing at an object that no longer exists.
+            s3_copy::s3_copy(&ctx, old_key, new_key).await?;
 
-            let body_bytes = body.bytes().await?;
+            if let Err(e) = db::rename_file(&ctx, old_key, new_key).await {
+                // Roll back the copy so the new key doesn't become an orphan.
+                let _ = bucket.delete(new_key).await;
+                return Err(e);
+            }
 
-            let content_type = old_obj
-                .http_metadata()
-                .content_type
-                .as_deref()
-                .unwrap_or("application/octet-stream")
-                .to_string();
-
-            // Put the object with the new key
-            let metadata = HttpMetadata {
-                content_type: Some(content_type.clone()),
-                ..Default::default()
-            };
-            bucket
-                .put(new_key, body_bytes)
-                .http_metadata(metadata)
-                .execute()
-                .await?;
-
-            // Delete the old object
+            // D1 now points at new_key — safe to drop the old object.
             bucket.delete(old_key).await?;
-
-            // Update D1 record
-            db::rename_file(&ctx, old_key, new_key).await?;
 
             console_log!("Renamed: {} -> {}", old_key, new_key);
             Ok(Response::from_json(&serde_json::json!({
