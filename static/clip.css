@@ -116,6 +116,12 @@
    browser handles the transfer and the `download` attribute names the file.
    An anchor needs the text-decoration and box model spelled out to match. */
 a.btn-ws { display: inline-block; text-decoration: none; line-height: 1.4; }
+/* The section sits after `.clip-layout` closes, so nothing separates it from
+   the columns above — a plain block sibling with no margin lands flush. The
+   gap has to beat the 1rem between cards inside `.clip-side`, or on desktop it
+   reads as one more card in that stack instead of a band under the whole
+   layout. */
+.ai-section { margin-top: 2.75rem; }
 .ai-note { font-size: 0.8rem; line-height: 1.5; color: var(--text-light); margin-bottom: 0.65rem; }
 .ai-sub { font-size: 0.85rem; margin: 0.9rem 0 0.45rem; display: flex; align-items: center; gap: 0.35rem; }
 
@@ -280,6 +286,9 @@ a.btn-ws { display: inline-block; text-decoration: none; line-height: 1.4; }
   .clip-container { padding: 0.75rem 0.75rem 1.5rem; }
   .clip-header { margin-bottom: 0.75rem; }
   .clip-section { padding: 0.9rem 0.85rem; border-radius: var(--radius-sm); }
+  /* Still clearly a break, but the phone stacks everything, so it competes
+     with the 1rem between the cards it now follows rather than beside. */
+  .ai-section { margin-top: 1.9rem; }
   .stage-card { padding: 0.65rem 0.7rem; }
   .clip-card { gap: 0.35rem; }
   /* Seven action buttons will not share a line with a name on a 360px
