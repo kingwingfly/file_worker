@@ -79,6 +79,24 @@ slash (clip ids, report ids, identity ids), takes `:name`.
 `cargo check` will not catch this. Neither will a unit test — there are none.
 It shows up as a 500 on every route at once.
 
+### `IDENTITY_SECRET` is a Secrets Store binding, not `ctx.secret()`
+
+It is declared as `[[secrets_store_secrets]]` in `wrangler.toml`, so it is read
+with `ctx.env.secret_store("IDENTITY_SECRET")?.get().await` — an **async** call.
+That is why `identity_secret()` and `current_identity()` are async and every
+identity-gated handler awaits them. `ctx.secret()` will not find it: that method
+reads plain env secrets (`wrangler secret put`), which is a different mechanism.
+
+The binding form was chosen on purpose over both alternatives. `wrangler secret
+put` works but leaves nothing in `wrangler.toml`, so a fresh clone cannot see the
+dependency exists until every clip route 500s. `[vars]` would put an HMAC signing
+key in git, where anyone who can read the repo can forge an identity cookie —
+impersonate a clip author, delete their clips, and stuff like counts.
+
+Rotating the key silently orphans data: clips survive in D1 but no cookie can
+prove ownership of them any more, so authors lose the ability to delete their own
+clips and every like can be cast again.
+
 ### Header values are ByteStrings
 
 `Headers::set` with any code point above U+00FF throws. Filenames here are

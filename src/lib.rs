@@ -36,24 +36,50 @@ mod cors;
 mod db;
 mod identity;
 
+/// Fetch the identity signing key from the Secrets Store binding.
+///
+/// This is a `[[secrets_store_secrets]]` binding, not a `wrangler secret put`
+/// value, so it is declared in `wrangler.toml` alongside R2/D1/KV — a fresh
+/// clone can see that it exists — while the key itself stays encrypted in the
+/// store rather than in git. The cost is that reading it is a `.get().await`
+/// instead of a synchronous env lookup, which is why every caller is async.
+///
+/// A binding that is missing or empty is a deploy mistake, not a client error,
+/// so it stays an `Err` (500) carrying the fix: every clip route fails
+/// identically without it, and a 401 here would send the frontend into a
+/// pointless re-issue loop.
+async fn identity_secret(ctx: &worker::RouteContext<()>) -> Result<String> {
+    let missing = || {
+        worker::Error::RustError(
+            "IDENTITY_SECRET secret-store binding is unavailable — check \
+             [[secrets_store_secrets]] in wrangler.toml and that the secret exists in the store"
+                .into(),
+        )
+    };
+    let value = ctx
+        .env
+        .secret_store("IDENTITY_SECRET")
+        .map_err(|_| missing())?
+        .get()
+        .await
+        .map_err(|_| missing())?
+        .ok_or_else(missing)?;
+
+    if value.is_empty() {
+        return Err(missing());
+    }
+    Ok(value)
+}
+
 /// Resolve the caller's identity from the `identity` cookie.
 ///
 /// `Ok(None)` means "no cookie, or a cookie that does not verify" — a normal
-/// 401, not an error. A missing `IDENTITY_SECRET` is a deploy mistake and stays
-/// an `Err` (500) with a message that names the fix, because every clip route
-/// fails identically without it.
-fn current_identity(
+/// 401, not an error.
+async fn current_identity(
     req: &Request,
     ctx: &worker::RouteContext<()>,
 ) -> Result<Option<identity::IdentityPayload>> {
-    let secret = ctx
-        .secret("IDENTITY_SECRET")
-        .map_err(|_| {
-            worker::Error::RustError(
-                "IDENTITY_SECRET is not set — run `npx wrangler secret put IDENTITY_SECRET`".into(),
-            )
-        })?
-        .to_string();
+    let secret = identity_secret(ctx).await?;
     let cookie_header = req.headers().get("Cookie")?.unwrap_or_default();
     Ok(identity::extract_identity_cookie(&cookie_header)
         .and_then(|token| identity::verify_identity(token, secret.as_bytes())))
@@ -363,7 +389,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             // who already has one strands every clip they own: ownership is
             // `clips.identity == cookie id`, so a new id means they can no
             // longer delete their own clips and their likes double-count.
-            let existing = current_identity(&req, &ctx)?;
+            let existing = current_identity(&req, &ctx).await?;
 
             let body: serde_json::Value = req.json().await?;
             // An *absent* nickname keeps whatever the caller already has; only an
@@ -384,15 +410,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 }
             };
 
-            let secret = ctx
-                .secret("IDENTITY_SECRET")
-                .map_err(|_| {
-                    worker::Error::RustError(
-                        "IDENTITY_SECRET is not set — run `npx wrangler secret put IDENTITY_SECRET`"
-                            .into(),
-                    )
-                })?
-                .to_string();
+            let secret = identity_secret(&ctx).await?;
             let token = identity::sign_identity(&id, &nickname, secret.as_bytes())
                 .ok_or_else(|| worker::Error::RustError("failed to sign identity token".into()))?;
 
@@ -423,7 +441,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         })
         // GET /api/identity/me — return the current identity (or null)
         .get_async("/api/identity/me", |req, ctx| async move {
-            let me = current_identity(&req, &ctx)?;
+            let me = current_identity(&req, &ctx).await?;
 
             Ok(Response::from_json(&serde_json::json!({
                 "identity": me.map(|p| serde_json::json!({
@@ -445,7 +463,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
             // Anonymous callers get `liked: 0` for every row rather than a 401 —
             // the list itself is public.
-            let viewer = current_identity(&req, &ctx)?.map(|p| p.id).unwrap_or_default();
+            let viewer = current_identity(&req, &ctx).await?.map(|p| p.id).unwrap_or_default();
             let clips = db::list_clips(&ctx, file_path, &viewer, sort, offset, limit).await?;
 
             Ok(Response::from_json(&serde_json::json!({
@@ -457,7 +475,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         })
         // POST /api/clips — create a clip (requires identity cookie)
         .post_async("/api/clips", |mut req, ctx| async move {
-            let who = match current_identity(&req, &ctx)? {
+            let who = match current_identity(&req, &ctx).await? {
                 Some(w) => w,
                 None => return identity_required(),
             };
@@ -501,7 +519,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         })
         // DELETE /api/clips/{id} — delete own clip (identity must match)
         .delete_async("/api/clips/:id", |req, ctx| async move {
-            let who = match current_identity(&req, &ctx)? {
+            let who = match current_identity(&req, &ctx).await? {
                 Some(w) => w,
                 None => return identity_required(),
             };
@@ -524,7 +542,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         })
         // PATCH /api/clips/{id} — toggle your own clip between public and private
         .patch_async("/api/clips/:id", |mut req, ctx| async move {
-            let who = match current_identity(&req, &ctx)? {
+            let who = match current_identity(&req, &ctx).await? {
                 Some(w) => w,
                 None => return identity_required(),
             };
@@ -557,7 +575,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         })
         // POST /api/clips/{id}/like — like a clip (identity required, no nickname needed)
         .post_async("/api/clips/:id/like", |req, ctx| async move {
-            let who = match current_identity(&req, &ctx)? {
+            let who = match current_identity(&req, &ctx).await? {
                 Some(w) => w,
                 None => return identity_required(),
             };
@@ -580,7 +598,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         })
         // DELETE /api/clips/{id}/like — unlike a clip
         .delete_async("/api/clips/:id/like", |req, ctx| async move {
-            let who = match current_identity(&req, &ctx)? {
+            let who = match current_identity(&req, &ctx).await? {
                 Some(w) => w,
                 None => return identity_required(),
             };
@@ -597,7 +615,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
         })
         // POST /api/clips/{id}/report — report a public clip
         .post_async("/api/clips/:id/report", |mut req, ctx| async move {
-            let who = match current_identity(&req, &ctx)? {
+            let who = match current_identity(&req, &ctx).await? {
                 Some(w) => w,
                 None => return identity_required(),
             };

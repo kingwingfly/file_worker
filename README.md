@@ -40,29 +40,49 @@ Edit `wrangler.toml` with your resource IDs:
 - `[[kv_namespaces]]` — your KV namespace id (for JWKS cache)
 - `[vars].CF_ACCESS_TEAM_DOMAIN` — your Cloudflare Access team domain
 - `[vars].CF_ACCESS_AUD` — your Cloudflare Access application audience tag
+- `[[secrets_store_secrets]].store_id` — the identity signing key, see step 4
 
-That is the whole configuration — no secrets store, and no R2 S3 API token. If
-you set one up for an earlier version of this worker, revoke it: nothing reads it
-any more, and it granted far more than the R2 binding does.
+There is no R2 S3 API token. If you set one up for an earlier version of this
+worker, revoke it: nothing reads it any more, and it granted far more than the
+R2 binding does.
 
-Additionally, set the identity signing secret before deploying:
+### 4. Create the identity signing key
+
+Clip ownership and like de-duplication ride on an HMAC-signed `identity` cookie,
+so the worker needs a signing key. It is a **Secrets Store binding**, not a
+`wrangler secret put` value: that keeps the dependency visible in
+`wrangler.toml` next to R2/D1/KV, while the key itself stays encrypted in the
+store and never enters the repo.
 
 ```bash
-npx wrangler secret put IDENTITY_SECRET
-# Paste a random base64 string, e.g. from: openssl rand -base64 32
+npx wrangler secrets-store store create zcll --remote
+# note the store id it prints, then:
+npx wrangler secrets-store secret create <store_id> \
+  --name IDENTITY_SECRET --value "$(openssl rand -base64 32)" --remote
 ```
 
-Without this, `/api/identity` and all clip/like/report endpoints will return 500.
-Secrets are not bindings — they never appear in `wrangler.toml`. For
-`wrangler dev`, put `IDENTITY_SECRET=…` in a `.dev.vars` file instead.
+Put that `<store_id>` into the `[[secrets_store_secrets]]` block in
+`wrangler.toml`, and set `secret_name` to whatever you passed to `--name`.
 
-### 4. Apply D1 migrations
+`secret_name` is the name inside the store and is free to change; `binding` is
+what the worker looks up (`ctx.env.secret_store("IDENTITY_SECRET")`) and must
+stay `IDENTITY_SECRET`. Without the binding, `/api/identity` and every clip,
+like and report route returns 500.
+
+Rotating the key invalidates every existing cookie: clips stay in D1 but their
+authors can no longer prove ownership, so they cannot delete their own clips and
+their likes can be cast a second time. Rotate deliberately, not routinely.
+
+For `wrangler dev`, put `IDENTITY_SECRET=…` in a `.dev.vars` file (gitignored)
+instead of reaching for the remote store.
+
+### 5. Apply D1 migrations
 
 ```bash
 npx wrangler d1 migrations apply zcll --remote
 ```
 
-### 5. Deploy
+### 6. Deploy
 
 ```bash
 npx wrangler deploy

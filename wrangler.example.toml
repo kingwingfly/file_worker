@@ -23,11 +23,30 @@ directory = "./static"
 binding = "ASSETS"
 run_worker_first = ["/api/*", "/admin/api/*"]
 
-# Secrets are not declared here — set them with `npx wrangler secret put <name>`
-# (and in `.dev.vars` for `wrangler dev`):
-#   IDENTITY_SECRET — HMAC key for signing identity cookies (clips, likes, reports).
-#   Generate with: openssl rand -base64 32
-#   Without it, /api/identity and every clip route returns 500.
+# HMAC key for signing identity cookies (clip ownership, like de-duplication).
+#
+# A Secrets Store binding rather than `wrangler secret put`, so the dependency is
+# visible here next to R2/D1/KV while the key itself stays encrypted in the store
+# and out of git. Create it once:
+#
+#   npx wrangler secrets-store store create <store_name> --remote
+#   npx wrangler secrets-store secret create <store_id> \
+#       --name <secret_name> --value "$(openssl rand -base64 32)" --remote
+#
+# Then put the returned store id below, and set `secret_name` to whatever you
+# passed to `--name`.
+#
+# `secret_name` is the name inside the store and is free to change. `binding` is
+# what the code looks up — `ctx.env.secret_store("IDENTITY_SECRET")` in
+# src/lib.rs — so renaming that one breaks every clip route at runtime, with a
+# 500 that `cargo check` cannot predict.
+#
+# Without this binding /api/identity and every clip, like and report route 500s.
+# For `wrangler dev`, put IDENTITY_SECRET in `.dev.vars` (gitignored) instead.
+[[secrets_store_secrets]]
+binding     = "IDENTITY_SECRET"
+store_id    = "<store_id>"
+secret_name = "IDENTITY_SECRET"
 
 [vars]
 # Cloudflare Access configuration — set these before deploy
