@@ -62,6 +62,23 @@ Mixing them up is the easy bug here.
   that reused an existing key would rewrite bytes an `immutable` cache is holding
   for a year. Never let the client pick the key at `/upload/start`.
 
+### Route params: `:id` for a segment, `*key` only at the end
+
+worker-rs 0.8.5 hands the pattern straight to `matchit` 0.7 and **panics** if the
+insert fails — and the panic happens while the `Router` is being built, i.e. on
+*every* request, so one bad pattern takes the whole Worker down, not just its own
+route. `matchit` rejects a catch-all that is not the last thing in the pattern:
+`/api/clips/*id/like` is `InsertError::InvalidCatchAll`, and `/api/clips/*id`
+next to `/api/clips/*id/like` in the same method map is a `Conflict`.
+
+So `*name` is only for values that legitimately contain `/` — object keys and
+display paths (`/api/file/*key`, `/admin/api/files/*path`) — and only as the
+final segment. Anything with a segment after it, or any id that cannot contain a
+slash (clip ids, report ids, identity ids), takes `:name`.
+
+`cargo check` will not catch this. Neither will a unit test — there are none.
+It shows up as a 500 on every route at once.
+
 ### Header values are ByteStrings
 
 `Headers::set` with any code point above U+00FF throws. Filenames here are

@@ -74,13 +74,27 @@ pub fn verify_identity(token: &str, secret: &[u8]) -> Option<IdentityPayload> {
     }
     let (encoded, sig) = token.split_once('.')?;
 
+    // Constant-time compare: `==` on &[u8] short-circuits on the first differing
+    // byte, which leaks how much of a forged signature was correct.
     let expected_sig = B64.encode(&hmac_sha256(secret, encoded.as_bytes()));
-    if expected_sig.as_bytes() != sig.as_bytes() {
+    if !ct_eq(expected_sig.as_bytes(), sig.as_bytes()) {
         return None;
     }
 
     let payload_bytes = B64.decode(encoded).ok()?;
     serde_json::from_slice::<IdentityPayload>(&payload_bytes).ok()
+}
+
+/// Length-independent byte comparison with no early exit.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn now_secs() -> u64 {

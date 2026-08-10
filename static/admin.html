@@ -1197,6 +1197,10 @@
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const data = await resp.json();
         renderFileList(data.files || []);
+        // Feed the proxy section from the listing we already have. This used to
+        // be a monkey-patch appended further down the script, which never ran for
+        // the initial loadFiles() call above it — and it refetched /admin/api/files.
+        updateProxySection(data.files || []);
       } catch (err) {
         const li = document.createElement('li');
         li.className = 'file-list-item';
@@ -1394,12 +1398,14 @@
     }
 
 
-    // Initial load
-    loadFiles();
-
     // ── Proxy management ──
     const proxyList = document.getElementById('proxy-list');
     let proxyFileData = []; // { file_path, key } from the file listing
+
+    // Initial load. It has to come *after* the `const`s above: loadFiles now
+    // calls updateProxySection, which reads proxyList, and a const is in its
+    // temporal dead zone until this line of the script has run.
+    loadFiles();
 
     function updateProxySection(files) {
       proxyFileData = files.filter(f => (f.content_type || '').startsWith('video/') || (f.content_type || '').startsWith('audio/'));
@@ -1408,48 +1414,93 @@
         return;
       }
       renderProxyRows();
-      // Refresh proxy counts for each file
-      for (const f of proxyFileData) {
-        fetchProxyCount(f);
+    }
+
+    // Proxies are fetched per file, on demand. Eagerly counting them fired one
+    // admin request per video on every listing refresh — /admin/api/files returns
+    // up to 1000 rows.
+    async function toggleProxyDetail(file, panel, btn) {
+      if (!panel.hidden) { panel.hidden = true; btn.textContent = '📹 代理'; return; }
+      panel.hidden = false;
+      btn.textContent = '📹 收起';
+      panel.textContent = '加载中...';
+      const path = file.path || file.key;
+      try {
+        const resp = await fetch('/admin/api/proxy?file_path=' + encodeURIComponent(path));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const proxies = (await resp.json()).proxies || [];
+        renderProxyDetail(file, panel, btn, proxies);
+      } catch (err) {
+        panel.textContent = '❌ 加载失败: ' + err.message;
       }
     }
 
-    async function fetchProxyCount(file) {
-      try {
-        const resp = await fetch('/admin/api/proxy?file_path=' + encodeURIComponent(file.path || file.key));
-        if (!resp.ok) return;
-        const data = await resp.json();
-        const count = (data.proxies || []).length;
-        const el = document.getElementById('proxy-count-' + CSS.escape(file.path || file.key));
-        if (el) el.textContent = count + ' 个代理';
-      } catch (_) {}
+    function renderProxyDetail(file, panel, btn, proxies) {
+      const rows = proxies.map(p => {
+        const line = document.createElement('div');
+        line.style.cssText = 'display:flex;align-items:center;gap:0.5rem;padding:0.2rem 0;font-size:0.8rem;';
+        const label = document.createElement('span');
+        label.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        label.textContent = (p.label || '代理') + ' · ' + formatSize(p.size);
+        label.title = p.key;
+        const del = document.createElement('button');
+        del.className = 'btn-file-action';
+        del.style.color = '#C0392B';
+        del.textContent = '🗑';
+        del.title = '删除该代理';
+        del.addEventListener('click', async () => {
+          if (!confirm('确认删除代理 "' + (p.label || p.key) + '"？')) return;
+          const resp = await fetch('/admin/api/proxy?key=' + encodeURIComponent(p.key), { method: 'DELETE' });
+          if (resp.ok) { panel.hidden = true; btn.textContent = '📹 代理'; toggleProxyDetail(file, panel, btn); }
+          else alert('删除失败');
+        });
+        line.append(label, del);
+        return line;
+      });
+
+      const up = document.createElement('button');
+      up.className = 'btn-file-action';
+      up.textContent = '⬆ 上传代理';
+      up.addEventListener('click', () => startProxyUpload(file, () => {
+        panel.hidden = true; btn.textContent = '📹 代理'; toggleProxyDetail(file, panel, btn);
+      }));
+
+      if (!rows.length) {
+        const empty = document.createElement('span');
+        empty.style.cssText = 'font-size:0.8rem;color:var(--text-light);';
+        empty.textContent = '暂无代理。';
+        panel.replaceChildren(empty, up);
+      } else {
+        panel.replaceChildren(...rows, up);
+      }
     }
 
     function renderProxyRows() {
       proxyList.replaceChildren(...proxyFileData.map(f => {
         const path = f.path || f.key;
         const name = path.split('/').pop() || path;
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'border-bottom:1px solid #f0f0f0;padding:0.35rem 0;';
         const row = document.createElement('div');
-        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:0.35rem 0;border-bottom:1px solid #f0f0f0;gap:0.5rem;';
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:0.5rem;';
         const nm = document.createElement('span');
         nm.style.cssText = 'font-size:0.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
         nm.textContent = '🎬 ' + name;
         nm.title = path;
-        const cnt = document.createElement('span');
-        cnt.id = 'proxy-count-' + CSS.escape(path);
-        cnt.style.cssText = 'font-size:0.78rem;color:var(--text-light);white-space:nowrap;';
-        cnt.textContent = '...';
+        const panel = document.createElement('div');
+        panel.hidden = true;
+        panel.style.cssText = 'padding:0.3rem 0 0.1rem 1rem;';
         const btn = document.createElement('button');
         btn.className = 'btn-file-action';
-        btn.textContent = '📹 上传代理';
-        btn.addEventListener('click', () => startProxyUpload(f));
-        row.append(nm, cnt, btn);
-        return row;
+        btn.textContent = '📹 代理';
+        btn.addEventListener('click', () => toggleProxyDetail(f, panel, btn));
+        row.append(nm, btn);
+        wrap.append(row, panel);
+        return wrap;
       }));
     }
 
-    function startProxyUpload(file) {
-      const path = file.path || file.key;
+    function startProxyUpload(file, onDone) {
       // Create a hidden file input for picking the proxy file
       const input = document.createElement('input');
       input.type = 'file';
@@ -1460,12 +1511,36 @@
         const label = prompt('代理标签 (如 "360p", "纯音频"):', 'proxy');
         if (label === null) return;
         await doProxyUpload(file, proxyFile, label || 'proxy');
+        if (onDone) onDone();
       });
       input.click();
     }
 
+    // Same retry set as the main uploader — 408 in particular is the edge giving
+    // up on a slow body and is purely transient (see isRetryable).
+    async function putProxyPart(uploadId, key, n, blob, attempts = 4) {
+      for (let i = 1; ; i++) {
+        let status = 0, resp = null;
+        try {
+          resp = await fetch(
+            '/admin/api/upload/part?upload_id=' + encodeURIComponent(uploadId) +
+            '&key=' + encodePath(key) + '&n=' + n,
+            { method: 'PUT', body: blob }
+          );
+          if (resp.ok) return (await resp.json()).etag;
+          status = resp.status;
+        } catch (_) { status = 0; }
+        if (i >= attempts || !isRetryable({ status })) {
+          throw new Error('Part ' + n + ' failed: ' + status);
+        }
+        await sleep(1000 * Math.pow(2, i - 1));
+      }
+    }
+
     async function doProxyUpload(file, proxyFile, label) {
       const path = file.path || file.key;
+      const contentType = proxyFile.type || 'application/octet-stream';
+      let upload_id = null, key = null;
       try {
         // Start
         const startResp = await fetch('/admin/api/proxy/start', {
@@ -1474,21 +1549,24 @@
           body: JSON.stringify({
             file_path: path,
             filename: proxyFile.name,
-            content_type: proxyFile.type || 'application/octet-stream',
+            content_type: contentType,
             label: label,
           }),
         });
         if (!startResp.ok) throw new Error('Start failed: ' + startResp.status);
-        const { upload_id, key } = await startResp.json();
+        ({ upload_id, key } = await startResp.json());
 
-        // Upload one part (proxies are small — single part is fine)
-        const partResp = await fetch(
-          '/admin/api/upload/part?upload_id=' + encodeURIComponent(upload_id) +
-          '&key=' + encodePath(key) + '&n=1',
-          { method: 'PUT', body: proxyFile }
-        );
-        if (!partResp.ok) throw new Error('Part failed: ' + partResp.status);
-        const { etag } = await partResp.json();
+        // Chunked, exactly like the main uploader. A proxy is smaller than the
+        // source but not necessarily small: sending it as one PUT walks into the
+        // edge's slow-body timeout (the 408 that CHUNK sizing exists to avoid),
+        // and a single failed part would mean re-sending the whole file.
+        const chunkSize = chunkSizeFor(proxyFile.size);
+        const parts = [];
+        for (let n = 1, offset = 0; offset < proxyFile.size; n++, offset += chunkSize) {
+          const blob = proxyFile.slice(offset, Math.min(offset + chunkSize, proxyFile.size));
+          const etag = await putProxyPart(upload_id, key, n, blob);
+          parts.push({ n, etag });
+        }
 
         // Complete
         const completeResp = await fetch('/admin/api/proxy/complete', {
@@ -1496,15 +1574,22 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             upload_id, key, file_path: path, label,
-            content_type: proxyFile.type || 'application/octet-stream',
-            parts: [{ n: 1, etag }],
+            content_type: contentType,
+            parts,
           }),
         });
         if (!completeResp.ok) throw new Error('Complete failed: ' + completeResp.status);
 
         alert('✅ 代理上传成功！');
-        fetchProxyCount(file);
       } catch (err) {
+        // Abandon the multipart upload rather than leaving it billable and
+        // invisible — there is no list_parts to find it again from.
+        if (upload_id && key) {
+          try {
+            await fetch('/admin/api/upload?upload_id=' + encodeURIComponent(upload_id) +
+              '&key=' + encodePath(key), { method: 'DELETE' });
+          } catch (_) {}
+        }
         alert('❌ 代理上传失败: ' + err.message);
       }
     }
@@ -1652,19 +1737,10 @@
     });
 
     function $(id) { return document.getElementById(id); }
-    // Override the existing loadFiles to also update the proxy section
-    const _origLoadFiles = loadFiles;
-    loadFiles = async function() {
-      await _origLoadFiles();
-      // After files load, update proxy section
-      try {
-        const resp = await fetch('/admin/api/files');
-        if (resp.ok) {
-          const data = await resp.json();
-          updateProxySection(data.files || []);
-        }
-      } catch (_) {}
-    };
+    // loadFiles() calls updateProxySection() directly — no wrapper. The wrapper
+    // that used to live here was installed *after* the initial loadFiles() call
+    // higher up the script, so the proxy section stayed empty until an upload,
+    // rename or delete happened to reload the list.
   </script>
 </body>
 </html>

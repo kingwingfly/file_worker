@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS proxy_videos (
     uploaded_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- `/api/proxy?file_path=` runs on every clip-page load; without this it is a
+-- full scan of the table.
+CREATE INDEX IF NOT EXISTS idx_proxy_videos_file_path ON proxy_videos(file_path);
+
 CREATE TABLE IF NOT EXISTS clips (
     id          TEXT NOT NULL PRIMARY KEY,  -- UUID
     file_path   TEXT NOT NULL,              -- references files.path
@@ -32,9 +36,11 @@ CREATE TABLE IF NOT EXISTS clips (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_clips_file_path ON clips(file_path);
-CREATE INDEX IF NOT EXISTS idx_clips_identity  ON clips(identity);
-CREATE INDEX IF NOT EXISTS idx_clips_public    ON clips(is_public);
+-- The public list is always `WHERE is_public = 1 AND file_path = ?`; a composite
+-- index serves it, whereas is_public alone is two-valued and useless on its own.
+CREATE INDEX IF NOT EXISTS idx_clips_public_path ON clips(is_public, file_path);
+CREATE INDEX IF NOT EXISTS idx_clips_file_path   ON clips(file_path);
+CREATE INDEX IF NOT EXISTS idx_clips_identity    ON clips(identity);
 
 CREATE TABLE IF NOT EXISTS clip_likes (
     clip_id    TEXT NOT NULL,
@@ -53,3 +59,7 @@ CREATE TABLE IF NOT EXISTS clip_reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_clip_reports_resolved ON clip_reports(resolved);
+-- The dedupe check on report insert and the cascades on clip delete both filter
+-- by clip_id; `identity` backs the batch-delete cleanup.
+CREATE INDEX IF NOT EXISTS idx_clip_reports_clip_id  ON clip_reports(clip_id);
+CREATE INDEX IF NOT EXISTS idx_clip_likes_identity   ON clip_likes(identity);

@@ -189,6 +189,49 @@ pub async fn list_proxies(
     result.results::<ProxyRecord>()
 }
 
+/// Every proxy R2 key attached to a file path.
+///
+/// Used by the file-delete route: proxies are separate R2 objects, and nothing
+/// else would ever find them again once the `files` row is gone.
+pub async fn list_proxy_keys(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<Vec<String>> {
+    Ok(list_proxies(ctx, file_path)
+        .await?
+        .into_iter()
+        .map(|p| p.key)
+        .collect())
+}
+
+/// Drop every proxy row for a file path (the R2 objects are the caller's job).
+pub async fn delete_proxies_for_path(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare("DELETE FROM proxy_videos WHERE file_path = ?")
+        .bind(&[JsValue::from(&D1Type::Text(file_path))])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// Does a proxy row exist for this R2 key?
+///
+/// `DELETE /admin/api/proxy?key=` deletes an R2 object; without this check a
+/// mistyped key would delete a *source* file's bytes and leave its `files` row
+/// pointing at nothing.
+pub async fn proxy_exists(ctx: &worker::RouteContext<()>, key: &str) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let found = db
+        .prepare("SELECT COUNT(*) AS cnt FROM proxy_videos WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(key))])?
+        .first::<i32>(Some("cnt"))
+        .await?;
+    Ok(found.unwrap_or(0) > 0)
+}
+
 /// Delete a proxy by its R2 key.
 pub async fn delete_proxy_by_key(
     ctx: &worker::RouteContext<()>,
@@ -200,7 +243,9 @@ pub async fn delete_proxy_by_key(
         .bind(&[JsValue::from(&D1Type::Text(key))])?
         .run()
         .await?;
-    Ok(result.success())
+    // `run()` reports success for a DELETE that matched nothing, so check the
+    // row count instead — the admin UI needs to tell "gone" from "never existed".
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
 // ── Clip records ──
@@ -218,9 +263,20 @@ pub struct ClipRecord {
     pub is_public: i32,
     pub is_featured: i32,
     pub like_count: Option<i32>,
+    /// 1 when the caller passed to `get_clip`/`list_clips` has already liked this
+    /// clip. The client needs this to pick POST vs DELETE on the like button —
+    /// without it there is no way to tell the two states apart.
+    pub liked: Option<i32>,
     pub created_at: String,
     pub updated_at: String,
 }
+
+/// The `like_count` / `liked` projection shared by every clip query.
+///
+/// `liked` binds the viewer's identity, so it is always the **first** bound
+/// parameter of any query built on top of this fragment.
+const CLIP_COLUMNS: &str = "c.*, (SELECT COUNT(*) FROM clip_likes WHERE clip_id = c.id) AS like_count, \
+     EXISTS(SELECT 1 FROM clip_likes WHERE clip_id = c.id AND identity = ?) AS liked";
 
 pub async fn insert_clip(
     ctx: &worker::RouteContext<()>,
@@ -255,18 +311,21 @@ pub async fn insert_clip(
     Ok(())
 }
 
+/// Fetch one clip. `viewer` is the caller's identity id (empty for anonymous)
+/// and only feeds the `liked` flag.
 pub async fn get_clip(
     ctx: &worker::RouteContext<()>,
     id: &str,
+    viewer: &str,
 ) -> Result<Option<ClipRecord>> {
     let db = ctx.d1("DB")?;
-    db.prepare(
-        "SELECT c.*, (SELECT COUNT(*) FROM clip_likes WHERE clip_id = c.id) AS like_count \
-         FROM clips c WHERE c.id = ?",
-    )
-    .bind(&[JsValue::from(&D1Type::Text(id))])?
-    .first::<ClipRecord>(None)
-    .await
+    db.prepare(&format!("SELECT {CLIP_COLUMNS} FROM clips c WHERE c.id = ?"))
+        .bind(&[
+            JsValue::from(&D1Type::Text(viewer)),
+            JsValue::from(&D1Type::Text(id)),
+        ])?
+        .first::<ClipRecord>(None)
+        .await
 }
 
 /// List public clips, optionally filtered by file_path.
@@ -276,6 +335,7 @@ pub async fn get_clip(
 pub async fn list_clips(
     ctx: &worker::RouteContext<()>,
     file_path: Option<&str>,
+    viewer: &str,
     sort: &str,
     offset: u32,
     limit: u32,
@@ -288,17 +348,18 @@ pub async fn list_clips(
         "WHERE c.is_public = 1 "
     };
 
+    // Featured leads either ordering — that flag is the only thing the admin
+    // "精选" toggle does, so it has to reach the list order to mean anything.
     let order = match sort {
-        "likes" => "ORDER BY like_count DESC, c.created_at DESC ",
-        _ => "ORDER BY c.created_at DESC ",
+        "likes" => "ORDER BY c.is_featured DESC, like_count DESC, c.created_at DESC ",
+        _ => "ORDER BY c.is_featured DESC, c.created_at DESC ",
     };
 
-    let query = format!(
-        "SELECT c.*, (SELECT COUNT(*) FROM clip_likes WHERE clip_id = c.id) AS like_count \
-         FROM clips c {where_clause}{order}LIMIT ? OFFSET ?"
-    );
+    let query =
+        format!("SELECT {CLIP_COLUMNS} FROM clips c {where_clause}{order}LIMIT ? OFFSET ?");
 
-    let mut params: Vec<JsValue> = vec![];
+    // `liked` binds first — see CLIP_COLUMNS.
+    let mut params: Vec<JsValue> = vec![JsValue::from(&D1Type::Text(viewer))];
     if let Some(path) = file_path {
         params.push(JsValue::from(&D1Type::Text(path)));
     }
@@ -316,8 +377,9 @@ pub async fn list_all_clips(
     limit: u32,
 ) -> Result<Vec<ClipRecord>> {
     let db = ctx.d1("DB")?;
-    let query = "SELECT c.*, (SELECT COUNT(*) FROM clip_likes WHERE clip_id = c.id) AS like_count \
-                 FROM clips c ORDER BY c.created_at DESC LIMIT ? OFFSET ?";
+    // The admin view has no viewer identity, so `liked` is always 0 here.
+    let query = "SELECT c.*, (SELECT COUNT(*) FROM clip_likes WHERE clip_id = c.id) AS like_count, \
+                 0 AS liked FROM clips c ORDER BY c.created_at DESC LIMIT ? OFFSET ?";
     let result = db
         .prepare(query)
         .bind(&[
@@ -337,14 +399,102 @@ pub async fn delete_clip(ctx: &worker::RouteContext<()>, id: &str) -> Result<boo
         .bind(&[JsValue::from(&D1Type::Text(id))])?
         .run()
         .await;
+    // Reports about a clip that no longer exists are not actionable — close them
+    // so the admin queue does not fill up with rows pointing at nothing.
+    let _ = db
+        .prepare("UPDATE clip_reports SET resolved = 1 WHERE clip_id = ?")
+        .bind(&[JsValue::from(&D1Type::Text(id))])?
+        .run()
+        .await;
     let result = db
         .prepare("DELETE FROM clips WHERE id = ?")
         .bind(&[JsValue::from(&D1Type::Text(id))])?
         .run()
         .await?;
-    Ok(result.success())
+    // `success()` is true even when the id matched nothing; callers use the
+    // return value to decide between 200 and 404, so report the row count.
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
+/// Move every clip and proxy that references `old_path` onto `new_path`.
+///
+/// `clips.file_path` and `proxy_videos.file_path` join on `files.path`, which
+/// rename mutates by design (see CLAUDE.md — the key is immutable, the path is
+/// not). Without this, renaming a video silently detaches every clip and proxy
+/// it has: `/api/clips?file_path=` and `/api/proxy?file_path=` are queried with
+/// the *new* name and match nothing.
+///
+/// The durable fix is to key both tables on the immutable `files.key` instead;
+/// that is a schema migration, and this keeps the two names consistent until then.
+pub async fn repoint_file_path(
+    ctx: &worker::RouteContext<()>,
+    old_path: &str,
+    new_path: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    for sql in [
+        "UPDATE clips SET file_path = ? WHERE file_path = ?",
+        "UPDATE proxy_videos SET file_path = ? WHERE file_path = ?",
+    ] {
+        db.prepare(sql)
+            .bind(&[
+                JsValue::from(&D1Type::Text(new_path)),
+                JsValue::from(&D1Type::Text(old_path)),
+            ])?
+            .run()
+            .await?;
+    }
+    Ok(())
+}
+
+/// Delete every clip (and its likes/reports) attached to a file path.
+///
+/// Returns the number of clips removed. Called when the underlying file is
+/// deleted — a clip is a time range into bytes that no longer exist.
+pub async fn delete_clips_for_path(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<u32> {
+    let db = ctx.d1("DB")?;
+    for sql in [
+        "DELETE FROM clip_likes WHERE clip_id IN (SELECT id FROM clips WHERE file_path = ?)",
+        "UPDATE clip_reports SET resolved = 1 WHERE clip_id IN (SELECT id FROM clips WHERE file_path = ?)",
+    ] {
+        let _ = db
+            .prepare(sql)
+            .bind(&[JsValue::from(&D1Type::Text(file_path))])?
+            .run()
+            .await;
+    }
+    let result = db
+        .prepare("DELETE FROM clips WHERE file_path = ?")
+        .bind(&[JsValue::from(&D1Type::Text(file_path))])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) as u32)
+}
+
+/// Re-point every clip of `identity` at a new display nickname.
+///
+/// `clips.nickname` is denormalised at insert time, so a nickname change has to
+/// be pushed into the existing rows or the author's old clips keep the old name.
+pub async fn rename_identity_nickname(
+    ctx: &worker::RouteContext<()>,
+    identity: &str,
+    nickname: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare("UPDATE clips SET nickname = ?, updated_at = datetime('now') WHERE identity = ?")
+        .bind(&[
+            JsValue::from(&D1Type::Text(nickname)),
+            JsValue::from(&D1Type::Text(identity)),
+        ])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// Flip a clip between public and private. Used by `PATCH /api/clips/{id}`.
 pub async fn set_clip_public(
     ctx: &worker::RouteContext<()>,
     id: &str,
@@ -416,22 +566,9 @@ pub async fn get_like_count(ctx: &worker::RouteContext<()>, clip_id: &str) -> Re
     Ok(result.unwrap_or(0))
 }
 
-pub async fn has_liked(
-    ctx: &worker::RouteContext<()>,
-    clip_id: &str,
-    identity: &str,
-) -> Result<bool> {
-    let db = ctx.d1("DB")?;
-    let result = db
-        .prepare("SELECT COUNT(*) as cnt FROM clip_likes WHERE clip_id = ? AND identity = ?")
-        .bind(&[
-            JsValue::from(&D1Type::Text(clip_id)),
-            JsValue::from(&D1Type::Text(identity)),
-        ])?
-        .first::<i32>(Some("cnt"))
-        .await?;
-    Ok(result.unwrap_or(0) > 0)
-}
+// A standalone `has_liked` used to live here. `ClipRecord::liked` (see
+// CLIP_COLUMNS) answers the same question in the query that already fetches the
+// clip, so an extra round trip is never needed.
 
 // ── Reports ──
 
@@ -452,14 +589,23 @@ pub async fn report_clip(
     identity: &str,
 ) -> Result<()> {
     let db = ctx.d1("DB")?;
-    db.prepare("INSERT INTO clip_reports (clip_id, reason, identity, created_at) VALUES (?, ?, ?, datetime('now'))")
-        .bind(&[
-            JsValue::from(&D1Type::Text(clip_id)),
-            JsValue::from(&D1Type::Text(reason)),
-            JsValue::from(&D1Type::Text(identity)),
-        ])?
-        .run()
-        .await?;
+    // One *open* report per identity per clip. `/api/clips/{id}/report` is
+    // unauthenticated beyond a self-issued cookie, so without this a single
+    // caller can flood the admin queue with the same clip.
+    db.prepare(
+        "INSERT INTO clip_reports (clip_id, reason, identity, created_at) \
+         SELECT ?, ?, ?, datetime('now') WHERE NOT EXISTS \
+         (SELECT 1 FROM clip_reports WHERE clip_id = ? AND identity = ? AND resolved = 0)",
+    )
+    .bind(&[
+        JsValue::from(&D1Type::Text(clip_id)),
+        JsValue::from(&D1Type::Text(reason)),
+        JsValue::from(&D1Type::Text(identity)),
+        JsValue::from(&D1Type::Text(clip_id)),
+        JsValue::from(&D1Type::Text(identity)),
+    ])?
+    .run()
+    .await?;
     Ok(())
 }
 
@@ -508,6 +654,22 @@ pub async fn delete_clips_by_identity(
     // Also delete likes BY this identity
     let _ = db
         .prepare("DELETE FROM clip_likes WHERE identity = ?")
+        .bind(&[JsValue::from(&D1Type::Text(identity))])?
+        .run()
+        .await;
+    // Close reports about the clips that are about to vanish, and drop reports
+    // filed by this identity — batch-delete is the abuse hammer, and leaving the
+    // offender's own reports queued defeats it.
+    let _ = db
+        .prepare(
+            "UPDATE clip_reports SET resolved = 1 \
+             WHERE clip_id IN (SELECT id FROM clips WHERE identity = ?)",
+        )
+        .bind(&[JsValue::from(&D1Type::Text(identity))])?
+        .run()
+        .await;
+    let _ = db
+        .prepare("DELETE FROM clip_reports WHERE identity = ?")
         .bind(&[JsValue::from(&D1Type::Text(identity))])?
         .run()
         .await;

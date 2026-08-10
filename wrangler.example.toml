@@ -23,6 +23,12 @@ directory = "./static"
 binding = "ASSETS"
 run_worker_first = ["/api/*", "/admin/api/*"]
 
+# Secrets are not declared here — set them with `npx wrangler secret put <name>`
+# (and in `.dev.vars` for `wrangler dev`):
+#   IDENTITY_SECRET — HMAC key for signing identity cookies (clips, likes, reports).
+#   Generate with: openssl rand -base64 32
+#   Without it, /api/identity and every clip route returns 500.
+
 [vars]
 # Cloudflare Access configuration — set these before deploy
 CF_ACCESS_TEAM_DOMAIN = "<name>.cloudflareaccess.com"

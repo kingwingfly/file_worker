@@ -53,6 +53,8 @@ npx wrangler secret put IDENTITY_SECRET
 ```
 
 Without this, `/api/identity` and all clip/like/report endpoints will return 500.
+Secrets are not bindings — they never appear in `wrangler.toml`. For
+`wrangler dev`, put `IDENTITY_SECRET=…` in a `.dev.vars` file instead.
 
 ### 4. Apply D1 migrations
 
@@ -81,6 +83,7 @@ npx wrangler deploy
 | GET | `/api/clips?file_path=&sort=likes\|time` | List public clips |
 | POST | `/api/clips` | Create a clip (needs identity cookie) |
 | DELETE | `/api/clips/{id}` | Delete own clip |
+| PATCH | `/api/clips/{id}` | Toggle own clip public/private `{is_public}` |
 | POST | `/api/clips/{id}/like` | Like a clip (needs identity cookie) |
 | DELETE | `/api/clips/{id}/like` | Unlike a clip |
 | POST | `/api/clips/{id}/report` | Report a clip `{reason}` |

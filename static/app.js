@@ -464,11 +464,13 @@ async function ensureClipIdentity() {
       const data = await resp.json();
       if (data.identity) { clipIdentity = data.identity; return clipIdentity; }
     }
-    // No identity — get a silent one
+    // No identity — get a silent one. Sending no `nickname` key at all leaves
+    // any nickname chosen on the clip page alone (the server only renames when
+    // the field is present).
     const idResp = await fetch('/api/identity', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nickname: '' }),
+      body: '{}',
     });
     if (idResp.ok) {
       const data = await idResp.json();
@@ -546,8 +548,8 @@ function renderClipPanel(clips) {
 
     const likeBtn = document.createElement('button');
     likeBtn.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:999px;border:1px solid #e0e0e0;background:white;cursor:pointer;';
-    likeBtn.textContent = '❤️';
-    likeBtn.addEventListener('click', () => clipLike(c.id, likeBtn));
+    likeBtn.textContent = c.liked ? '💖' : '🤍';
+    likeBtn.addEventListener('click', () => clipLike(c, likeBtn));
 
     const dlBtn = document.createElement('button');
     dlBtn.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:999px;border:1px solid #e0e0e0;background:white;cursor:pointer;';
@@ -560,18 +562,23 @@ function renderClipPanel(clips) {
   }));
 }
 
-async function clipLike(clipId, btn) {
+// `c.liked` is computed server-side from the identity cookie. Probing with a
+// DELETE and retrying on 404 never worked — unlike always answers 200, so the
+// POST branch was unreachable and nothing could ever be liked from here.
+async function clipLike(c, btn) {
   await ensureClipIdentity();
   if (!clipIdentity) return;
   btn.disabled = true;
   try {
-    let resp = await fetch('/api/clips/' + encodeURIComponent(clipId) + '/like', { method: 'DELETE' });
-    if (resp.status === 404) {
-      resp = await fetch('/api/clips/' + encodeURIComponent(clipId) + '/like', { method: 'POST' });
-    }
+    const resp = await fetch('/api/clips/' + encodeURIComponent(c.id) + '/like', { method: c.liked ? 'DELETE' : 'POST' });
     if (resp.ok && state.currentPreview) loadClipPanel(state.currentPreview);
   } catch (_) {} finally { btn.disabled = false; }
 }
+
+// Single-quote every interpolated value: this line is pasted into a shell, and
+// `c.name` is attacker-supplied text from someone else's public clip. Inside
+// '…' the shell expands nothing.
+function shellQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
 function showClipExport(c) {
   const file = state.currentPreview;
@@ -579,8 +586,9 @@ function showClipExport(c) {
   const start = c.start_time || 0;
   const dur = (c.end_time || 0) - start;
   const name = (c.name || 'clip') + '.mp4';
-  const cmd = 'ffmpeg -ss ' + start + ' -i "' + location.origin + '/api/file/' +
-    encodePath(file.key) + '" -t ' + dur.toFixed(1) + ' -c copy "' + name + '"';
+  const cmd = 'ffmpeg -ss ' + Number(start).toFixed(1) +
+    ' -i ' + shellQuote(location.origin + '/api/file/' + encodePath(file.key)) +
+    ' -t ' + dur.toFixed(1) + ' -c copy ' + shellQuote(name);
 
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:10001;';
