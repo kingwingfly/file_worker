@@ -17,6 +17,23 @@
   --radius: 16px;
   --radius-sm: 8px;
   --transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Semantic tokens. New rules use these; the older hardcoded #f0f0f0 /
+     #D5F5E3 / #C0392B literals scattered through admin.html and clip.html are
+     left alone on purpose — sweeping them in would be a large diff that
+     changes nothing on screen. */
+  --border: #EFEFEF;
+  --border-strong: #E0E0E0;
+  --muted-bg: #F7FAFC;
+  --ok: #1E8449;
+  --ok-bg: #D5F5E3;
+  --ok-border: #A9DFBF;
+  --danger: #C0392B;
+  --danger-bg: #FADBD8;
+  --danger-border: #F5B7B1;
+  --warn: #B7950B;
+  --warn-bg: #FCF3CF;
+  --warn-border: #F9E79F;
 }
 
 /* Reset */
@@ -484,7 +501,7 @@ body::after {
   background: var(--white);
   border-radius: var(--radius);
   max-width: 95vw;
-  max-height: 95vh;
+  max-height: 92dvh;
   width: 100%;
   overflow: hidden;
   box-shadow: 0 20px 60px rgba(0,0,0,0.2);
@@ -523,26 +540,76 @@ body::after {
 }
 
 .modal-media {
-  flex: 1;
+  flex: 1 1 auto;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 0;
+  /* Last line of defence. Everything below is meant to keep the picture inside
+     this box; if it ever escapes again it gets clipped rather than covering
+     the source picker and the clip list. */
+  overflow: hidden;
   background: #1a1a1a;
 }
 
-.modal-media img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-}
+/* `max-height: 100%` does NOT work here and never did.
+   A percentage height resolves against the containing block's height, and this
+   box is a flex item whose height comes from flex-grow — indefinite — so the
+   declaration computes to `none`. With `width: 100%` the element's height then
+   comes from its aspect ratio (1300px wide ÷ 16:9 = 731px) and nothing clamps
+   it: the picture overflowed a 709px box top and bottom, and when the clip
+   panel shrank that box to 530px the video stayed 731px and rode up off the
+   top of the screen.
 
+   `align-self: stretch` takes the height straight from the flex container
+   instead — no percentage involved, so it is always definite and always
+   re-resolves when the panel opens or closes. `object-fit` then fits the
+   picture inside that box. */
+.modal-media img,
 .modal-media video {
-  max-width: 100%;
-  max-height: 100%;
+  align-self: stretch;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
   display: block;
   outline: none;
 }
+
+.modal-media video { object-fit: contain; }
+
+/* A <video> with no metadata yet is 300×150, so the card opens at a quarter of
+   its size and lurches to full height the instant dimensions arrive. Reserve
+   the slab up front.
+   Gated on viewport height so the floor can never bind: at 700px tall the card
+   is capped at 644, the rows and an open clip panel take ~276, and the 315px
+   floor still fits in what is left. A floor that *did* bind would push the
+   panel past the card's max-height and `overflow: hidden` would eat it.
+   `:has()` keeps it off audio and images; browsers without it just keep the
+   jump. */
+@media (min-height: 700px) {
+  .modal-media:has(video) { min-height: min(45dvh, 26rem); }
+}
+
+/* `scale-down`, not `contain`: an image smaller than the modal keeps its own
+   size instead of being blown up, which is what the old max-width/max-height
+   pair did for images and the one thing about it that was worth keeping. */
+.modal-media img { object-fit: scale-down; }
+
+/* Was seven inline style properties in openPreview. The 80vh cap that came
+   with them is gone — .modal-card already bounds the height, and a fixed vh
+   fought the mobile rule that switches the card to 100dvh. */
+.modal-audio-wrap {
+  width: 100%;
+  padding: 3rem 2rem;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-audio-wrap audio { width: 100%; }
 
 /* Shown when the browser cannot decode the file — most often HEVC in a
    Chrome build with no platform decoder. Download is the only recourse,
@@ -552,6 +619,15 @@ body::after {
   text-align: center;
   padding: 3rem 2rem;
   max-width: 34rem;
+  /* `.modal-media` clips its overflow, and the only control on this screen is
+     the download button at the bottom — on a short window that button would be
+     cut off with no way to reach it. Stretch (definite height, no percentage)
+     plus scroll; the flex centring keeps it looking identical when it fits. */
+  align-self: stretch;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
 
 .modal-media .media-unplayable h3 {
@@ -579,6 +655,9 @@ body::after {
 .modal-media .media-unplayable .codec-support .no { color: #f1948a; }
 
 .modal-media .media-unplayable button {
+  /* The notice is a flex column now (see above); without this the button
+     stretches to the full 34rem instead of staying a pill. */
+  align-self: center;
   padding: 0.6rem 1.5rem;
   border-radius: 999px;
   border: none;
@@ -695,20 +774,48 @@ body::after {
 
 /* ── Responsive ── */
 @media (max-width: 640px) {
+  .site-header { padding: 1.4rem 1rem 1.1rem; border-radius: 0 0 28px 28px; }
   .site-title { font-size: 1.4rem; }
+  .filter-bar { padding: 1rem 0.75rem; gap: 0.4rem; }
   .gallery-grid {
     grid-template-columns: 1fr;
     padding: 0 0.75rem 1.5rem;
     gap: 1rem;
   }
   .filter-btn { padding: 0.4rem 0.9rem; font-size: 0.85rem; }
-  .modal-card { max-width: 100vw; max-height: 100vh; border-radius: 0; }
-  .modal-media { max-height: calc(100vh - 56px); }
+  /* dvh, not vh: iOS Safari's vh is the *large* viewport, so a 100vh card sits
+     partly under the browser chrome until the address bar collapses. */
+  .modal-card { max-width: 100vw; max-height: 100dvh; border-radius: 0; }
+  .modal-media { max-height: calc(100dvh - 56px); }
+  .modal-info { padding: 0.6rem 0.75rem; gap: 0.5rem; }
+  .source-selector { padding: 0.5rem 0.75rem; }
+  .clip-panel { padding: 0.6rem 0.75rem; max-height: 45dvh; }
 }
 
 @media (min-width: 641px) and (max-width: 1024px) {
   .gallery-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* Wide desktops were capped at 1200px, which left a 2560px monitor showing the
+   same four columns as a 1440p one. */
+@media (min-width: 1500px) {
+  .gallery-grid { max-width: 1600px; }
+}
+
+/* Fingers, not a narrow window: a 900px-wide desktop browser should keep its
+   compact controls, a 900px-wide tablet should not. */
+@media (pointer: coarse) {
+  .filter-btn,
+  .btn-download,
+  .modal-close,
+  .btn-load-more,
+  .btn-retry { min-height: 40px; }
+  .source-selector select { min-height: 36px; }
+  .clip-panel-actions button { min-height: 34px; min-width: 2.4rem; }
+}
+
+/* Home indicator / gesture bar overlaps a bottom-anchored footer on iOS. */
+.site-footer { padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px)); }
 
 /* ── Reduced Motion ── */
 @media (prefers-reduced-motion: reduce) {
@@ -726,10 +833,44 @@ body::after {
 }
 
 /* ── Clip Panel (inside preview modal) ── */
+/* Source picker: original vs any proxies the admin attached. Sits between the
+   player and the info row so switching is next to what it changes. */
+.source-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid #eee;
+  font-size: 0.85rem;
+}
+
+.source-selector label {
+  font-weight: 500;
+  color: var(--text-light);
+  white-space: nowrap;
+}
+
+.source-selector select {
+  padding: 0.3rem 0.5rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  background: var(--white);
+  max-width: 100%;
+}
+
+.source-selector select:focus {
+  border-color: var(--pink);
+  outline: none;
+}
+
+.source-note { color: var(--text-light); font-size: 0.78rem; }
+
 .clip-panel {
   border-top: 2px solid var(--soft-blue);
   padding: 0.75rem 1rem;
-  max-height: 40vh;
+  max-height: 38dvh;
   overflow-y: auto;
   background: #fafafa;
 }
@@ -765,4 +906,360 @@ body::after {
   margin-top: 0.5rem;
   padding-top: 0.5rem;
   border-top: 1px solid #f0f0f0;
+}
+
+.clip-page-link {
+  display: inline-block;
+  text-decoration: none;
+  padding: 0.4rem 1rem;
+  font-size: 0.85rem;
+}
+
+/* Rows in the panel. These were built entirely from `style.cssText` in
+   renderClipPanel — one copy of the same declarations per element per clip. */
+.clip-panel-item {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.clip-panel-item:last-child { border-bottom: none; }
+
+.clip-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.25rem;
+}
+
+.clip-panel-name {
+  font-weight: 600;
+  color: var(--pink);
+  cursor: pointer;
+}
+
+.clip-panel-name:hover { text-decoration: underline; }
+
+.clip-panel-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--text-light);
+}
+
+.clip-panel-meta {
+  font-size: 0.73rem;
+  color: var(--text-light);
+  margin-left: auto;
+}
+
+.clip-panel-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  background: var(--warn-bg);
+  color: var(--warn);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+}
+
+.clip-panel-actions { display: flex; gap: 0.3rem; }
+
+.clip-panel-actions button {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--white);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.clip-panel-actions button:hover {
+  background: var(--muted-bg);
+  border-color: var(--soft-blue);
+}
+
+.clip-panel-status {
+  text-align: center;
+  padding: 1rem;
+  color: var(--text-light);
+  font-size: 0.85rem;
+}
+
+.clip-panel-status.err { color: var(--danger); }
+.clip-panel-status a { color: var(--pink); }
+
+.btn-clip { margin-right: 0.3rem; }
+
+/* ── Clip export dialog (gallery) ──
+   showClipExport() used to inline every one of these as style.cssText. It sits
+   above the preview modal, which is why the z-index is one higher. */
+.clip-export-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 10001;
+  display: flex;
+  /* flex-start + scroll, not centre: a centred child with no max-height puts
+     the action row off-screen on a phone in landscape, unreachable. Same
+     reasoning as the clip page's overlays. */
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 1.5rem 1rem;
+}
+
+.clip-export-dialog {
+  background: var(--white);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  width: min(520px, 100%);
+  max-height: calc(100dvh - 3rem);
+  overflow-y: auto;
+  box-shadow: var(--shadow-hover);
+}
+
+.clip-export-dialog h3 { margin-bottom: 0.6rem; font-size: 1.05rem; color: var(--text); }
+
+.clip-export-note { font-size: 0.78rem; color: var(--text-light); margin-bottom: 0.5rem; line-height: 1.5; }
+
+.clip-export-quick {
+  background: var(--muted-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.85rem;
+  margin-bottom: 0.9rem;
+}
+
+.clip-export-quick .clip-export-note { margin: 0.55rem 0 0; }
+
+.clip-export-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  overflow: hidden;
+  margin-top: 0.55rem;
+}
+
+.clip-export-bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--pink);
+  transition: width 0.15s linear;
+}
+
+.clip-export-cmd {
+  background: #16181D;
+  color: #7BE38B;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  padding: 0.6rem;
+  border-radius: var(--radius-sm);
+  /* The command is one unbreakable line with a long URL in it. Without the
+     wrap it becomes this dialog's min-content and widens the whole overlay. */
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 8rem;
+  overflow: auto;
+  margin-bottom: 0.6rem;
+  line-height: 1.5;
+}
+
+.clip-export-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+
+.clip-export-btn {
+  flex: 1 1 auto;
+  padding: 0.5rem 1rem;
+  border-radius: 999px;
+  border: none;
+  background: var(--soft-blue);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.clip-export-btn:hover:not(:disabled) { background: #9AD8F0; }
+.clip-export-btn:disabled { opacity: 0.55; cursor: default; }
+
+/* The one-click button owns its own line and is the dialog's primary action. */
+.clip-export-btn.primary { width: 100%; flex: none; background: var(--pink); color: var(--white); }
+.clip-export-btn.primary:hover:not(:disabled) { background: #FF9AAF; }
+.clip-export-btn.ghost { background: #F0F0F0; }
+.clip-export-btn.ghost:hover:not(:disabled) { background: #E4E4E4; }
+
+@media (pointer: coarse) {
+  .clip-export-btn { min-height: 40px; }
+}
+
+/* ── Clip rank (gallery) ──
+   A leaderboard of moments, above the gallery's list of source files. */
+.clip-rank {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto 1.5rem;
+  padding: 0 1rem;
+}
+
+.clip-rank-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.clip-rank-title { font-size: 1.05rem; color: var(--text); font-weight: 700; }
+
+.rank-tabs { display: flex; gap: 0.35rem; margin-left: auto; }
+
+.rank-tab {
+  border: 1px solid var(--border-strong);
+  background: var(--white);
+  color: var(--text-light);
+  border-radius: 999px;
+  padding: 0.3rem 0.85rem;
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.rank-tab:hover { border-color: var(--soft-blue); color: var(--text); }
+.rank-tab.active { background: var(--soft-blue); color: var(--text); border-color: var(--soft-blue); font-weight: 600; }
+
+.clip-rank-list {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.rank-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.rank-row:last-child { border-bottom: none; }
+.rank-row:hover { background: var(--muted-bg); }
+
+.rank-pos {
+  flex: 0 0 1.75rem;
+  text-align: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-light);
+}
+
+.rank-pos.medal { font-size: 1.15rem; }
+
+/* min-width: 0 is what lets the ellipsis below actually engage — without it a
+   long clip name sets this column's min-content and pushes the like button and
+   the play/export controls off the right edge of a phone. */
+.rank-main { flex: 1 1 auto; min-width: 0; }
+
+.rank-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rank-badge {
+  margin-left: 0.4rem;
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: var(--warn-bg);
+  color: var(--warn);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.rank-meta {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 0.74rem;
+  color: var(--text-light);
+  margin-top: 0.15rem;
+}
+
+.rank-time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.rank-from { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 16rem; }
+
+.rank-desc {
+  font-size: 0.76rem;
+  color: var(--text-light);
+  margin-top: 0.2rem;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+
+.rank-actions { display: flex; align-items: center; gap: 0.3rem; flex-shrink: 0; }
+
+.rank-like, .rank-btn {
+  border: 1px solid var(--border-strong);
+  background: var(--white);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.76rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+.rank-like:hover:not(:disabled), .rank-btn:hover { border-color: var(--pink); background: #FFF5F7; }
+.rank-like.liked { border-color: var(--pink); background: #FFF0F3; }
+.rank-like:disabled { opacity: 0.6; cursor: default; }
+
+.rank-gone { font-size: 0.72rem; color: var(--text-light); }
+
+.rank-more {
+  display: block;
+  margin: 0.75rem auto 0;
+  border: 1px solid var(--border-strong);
+  background: var(--white);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.4rem 1.2rem;
+  font-size: 0.82rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.rank-more:hover:not(:disabled) { border-color: var(--soft-blue); background: var(--muted-bg); }
+.rank-more:disabled { opacity: 0.6; cursor: default; }
+
+@media (max-width: 640px) {
+  .clip-rank { padding: 0 0.75rem; }
+  .rank-row { gap: 0.5rem; padding: 0.55rem 0.6rem; flex-wrap: wrap; }
+  .rank-pos { flex-basis: 1.4rem; }
+  /* The controls drop to their own line rather than squeezing the title into a
+     couple of characters. `rank-pos` keeps its column, so they line up under
+     the text they belong to. */
+  .rank-actions { flex-basis: 100%; justify-content: flex-end; }
+  .rank-from { max-width: 100%; }
+}
+
+@media (pointer: coarse) {
+  .rank-tab, .rank-like, .rank-btn, .rank-more { min-height: 36px; }
 }

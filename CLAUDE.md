@@ -79,6 +79,209 @@ slash (clip ids, report ids, identity ids), takes `:name`.
 `cargo check` will not catch this. Neither will a unit test — there are none.
 It shows up as a 500 on every route at once.
 
+### One uploader, three modes
+
+The admin upload section uploads a new file, a **proxy** (a low-quality playback
+source) or an **attachment** (a downloadable related file — subtitles, a
+transcript); `session.mode` picks the branch. Only `/start` and `/complete`
+differ — `/admin/api/upload/part` already served all three — so both attach
+modes get resume, the progress bar, the wake lock and the retry set for free.
+Proxies used to have a parallel stripped-down uploader that had none of it, and
+attachments would have grown a second one.
+
+**Never test the mode with a bare `=== 'proxy'`.** With two modes that
+comparison doubled as "not a plain file upload"; with three it silently
+reclassifies attachments as file uploads. Every site goes through
+`attachSpec(mode)`, which returns the mode's endpoints/labels or `null` for a
+plain file — so a legacy session with no `mode` still resolves to a file upload
+without a special case, and the audit is one grep instead of nine.
+
+Three things that must stay branched:
+
+- **`uploadLanded()`**, the reconcile oracle for a lost `/complete` response,
+  queries the mode's own listing (`spec.listUrl`). An attached upload is never
+  in `/admin/api/files`, so asking the file listing would report every
+  *successful* proxy/attachment upload as failed — and `complete` is the one
+  step that must never be blindly retried, because it has already consumed the
+  multipart upload, so two reported failures send the admin to Discard over an
+  object sitting in the bucket. This is the expensive one to get wrong.
+- **`check-key` is skipped in both attach modes.** It tests `files.path` for
+  collisions; proxies and attachments are deliberately many-per-`file_path`, so
+  it would raise the overwrite dialog over an unrelated file, and overwrite
+  means nothing for either.
+- **`filename` is sent at `/attachment/complete` and ignored by
+  `/proxy/complete`.** A proxy is only ever played, so its opaque storage key is
+  enough; an attachment is downloaded, and `/api/file/{key}?download=1` has no
+  way to derive a display name from a key (migration 0002).
+
+`sessionAttachPath()` / `sessionAttachLabel()` also read the pre-rename
+`proxyFilePath` / `proxyLabel` fields, so an upload already in flight when this
+version ships still resumes.
+
+### Related files ride the public `/api/file` route
+
+`file_attachments` (migration 0005) is a structural twin of `proxy_videos`:
+many per `files.path`, one R2 object each, listed publicly at
+`/api/attachments?file_path=`. It is a separate table rather than a `kind`
+column, because a proxy is a *playback source* (the clip page puts it in the
+source selector and cuts against it) and an attachment is a *download* — they
+share the upload path and nothing else, and merging them would put a `WHERE
+kind=` on `/api/proxy`, which runs on every clip-page load.
+
+There is **no attachment download route**. `/api/file/*key` already does no D1
+read, and already re-clamps any non-media stored type to
+`application/octet-stream`, so `/api/file/{key}?download=1&name={filename}`
+serves an attachment safely today. `sanitize_attachment_content_type()` exists
+only so the record carries something more descriptive than octet-stream; it is
+D1/R2 metadata and the serve path must keep ignoring it. Teaching
+`/api/file/*key` to honour it would reopen the stored-XSS hole on the same
+origin as `/admin`.
+
+Like proxies, attachments are in `repoint_file_path` (rename detaches them
+otherwise, silently) and in the file-delete cleanup (nothing enumerates their
+R2 objects once the `files` row is gone).
+
+The clip page offers **download only, never copy-to-clipboard**. `.srt` in the
+wild is routinely GBK, Big5 or Shift-JIS, and `Response.text()` assumes UTF-8 —
+copying would hand over silent mojibake with no signal anything went wrong. A
+plain `<a download>` preserves the bytes and never puts the file in the page's
+heap. The skill keeps its copy button because that content is ours and
+known-UTF-8.
+
+### `SKILL.md` is served from the repo, not copied into `static/`
+
+`GET /api/skill` returns the repo's own `SKILL.md` via `include_str!`, so the
+skill the clip page hands out cannot drift from the one the README points at.
+Its `Cache-Control` is `max-age=300`, deliberately not the `immutable` used for
+`/api/file/*key` — unlike an R2 key this content changes with every deploy.
+
+`?download=1` attaches it **under the name `SKILL.md`**, not a prettified one:
+it is a standard Agent Skill with YAML frontmatter (`name: clip-description`),
+and that filename is what lets it drop into `~/.claude/skills/<name>/` without
+being renamed. The UI calls it "skill" for the same reason — it is a skill, not
+a page of instructions.
+
+The bare URL stays inline so the page's 复制 button can fetch it. The
+static-assets binding serves `static/`, and `SKILL.md` is not in there — do not
+"simplify" this by copying the file, that is two copies in git and the served
+one goes stale first.
+
+### Sources: gallery picks, clip page defaults to the smallest
+
+`/api/proxy` is public, so the gallery preview offers the original plus every
+proxy as playback sources, and `downloadFile` follows the selection. Export
+deliberately does **not** — clipping happens against the proxy, export always
+against the HQ original. That holds for both export paths: the ffmpeg command
+and the one-click download below.
+
+The clip page defaults its preview to the smallest source, **including
+audio-only proxies**. It used to exclude them for a video file, reasoning that
+opening in sound-only mode hides the picture needed to pick boundaries. That
+reasoning fails in exactly the case it matters: when a file's *only* proxy is
+audio-only, the filter left nothing eligible and fell back to the original — so
+uploading a 30 MB proxy still had the page pulling a 40 GB source. Between "no
+picture" and "no playback at all", no picture wins.
+
+The old concern is real, so it is handled rather than designed around:
+`updatePreviewNote` says the preview is sound-only and renders a
+切换到画面 button that switches to the smallest source that has one. Defaulting
+to audio is only acceptable because getting the picture back is one tap.
+
+The original's size is not in `proxy_videos`, so the clip link carries `&size=`.
+Without it the original ranks as unknown-and-largest, which is the right
+fallback — a proxy exists in order to be smaller.
+
+### One-click clip download is a remux in the page (`static/mp4clip.js`)
+
+The ⬇ button cuts the MP4 client-side and hands back a file; the ffmpeg command
+stays beside it as the fallback. **Still no server-side transcoding or
+concatenation** — the Worker only serves the same ranged `/api/file/{key}` reads
+the player already makes.
+
+It works because `moov` carries, per sample, a decode time, a byte offset and a
+size. So the module walks the top-level boxes with 16-byte Range requests to
+find `moov` (2–3 requests, faststart or not), resolves the time window to byte
+ranges *before* fetching any media — which is also where the exact output size on
+the button comes from — then fetches only those ranges and writes a fresh
+container. A 20-second clip out of a 40 GB source moves ~20 seconds of bytes.
+
+`stsd` is copied **verbatim**, which is why H.264, HEVC and AV1 all work and why
+no codec is named anywhere in that file. Same reasoning as the `canPlayType`
+rule above: the container is knowable, the contents are not.
+
+Three things that look optional and are not:
+
+- **The emitted `elst` is load-bearing.** It was left out at first, and both the
+  AAC priming delay and the composition-time shift leaked into the output —
+  video at `start_time=0.066667` against audio at `0.000`, a 67 ms lag, clearly
+  visible. `media_time = sourceEditOffset + t0*timescale - firstKeptSampleDts`
+  reproduces exactly what ffmpeg's own `-c copy` writes, and is provably ≥ 0, so
+  a version-0 `elst` always suffices.
+- **`ctts` is therefore copied unmodified.** The formula above assumes untouched
+  composition offsets. Normalising them *as well* (subtracting the minimum, the
+  obvious-looking way to force a 0 start) trims the same shift twice and pulls
+  video ahead of audio by exactly as much as omitting the `elst` pushed it
+  behind.
+- **The cut snaps back to the previous keyframe**, because decoding is the thing
+  being refused. `plan()` returns `actualStart` and the UI says so. `ffmpeg -ss T
+  -c copy` snaps identically, so both export paths produce the same clip.
+
+Declines are explicit and always name a reason — fragmented MP4 (samples live in
+`moof`, so `mvex` in `moov` is the tell), non-MP4, oversized `moov`, clip too
+large for memory. Each one falls back to the ffmpeg command. A silent failure
+would be worse than not offering the button.
+
+Verify by remuxing, not by looking: decode both the clip and the source to
+`ffmpeg -f framecrc` (with `-c copy`, so no decoder is involved) and assert the
+clip's packets are a contiguous byte-identical run of the source's; then
+`ffprobe` both streams' `start_time` for the A/V offset above. A per-frame
+`framemd5` comparison will show spurious diffs at the boundary — the decoder
+resets state there — and that noise is what hides the real 67 ms bug.
+
+### Clips carry their file's key (`file_key`)
+
+A clip row stores `file_path` — the *mutable display name* — and nothing else
+about its file. That is enough on the clip page, which already has the key in its
+own query string, but not for the gallery's clip rank, which lists clips across
+every file and has to build `/api/file/{key}` URLs to play or cut them.
+
+So `CLIP_COLUMNS` joins `files` (`CLIP_FROM`) and projects `file_key`,
+`file_content_type` and `file_size`. Two things about that join:
+
+- **`LEFT JOIN`, not inner.** A clip whose file was deleted still lists, with
+  `file_key: null`, and the UI shows 源文件已删除 instead of play/export buttons.
+  An inner join would make those rows silently vanish from every query —
+  including their author's own list, so they could never be cleaned up.
+- It joins on `files.path`, which `idx_files_path` covers as a UNIQUE index, so
+  it is one index lookup per row. Joining on anything else here would put a scan
+  on `/api/clips`.
+
+`list_all_clips` (admin) spells the same columns out rather than reusing the
+const, because it has no viewer identity to bind and hardcodes `0 AS liked`.
+
+### Clip sets group, `is_public` decides
+
+Migration 0004 adds `clip_sets` and a nullable `clips.set_id`. `set_id` is
+**grouping only** — `clips.is_public` stays the single source of truth for
+visibility. Two flags would eventually disagree, and the gallery player wants one
+flat list of public clips whatever their grouping, which a nullable `set_id`
+gives for free: `/api/clips` returns members too, and the clip page's shared area
+filters them out with `!c.set_id` so they are not listed twice.
+
+A set's `like_count` is the **sum of its members' likes**. There is no
+`clip_set_likes` table, so the per-clip heart on the gallery keeps meaning what
+it always did, and "sort by likes" over collections needs no new schema.
+
+`clip_sets.file_path` joins on `files.path` — the mutable name — so it is in
+`repoint_file_path` alongside `clips` and `proxy_videos`. Leaving it out detaches
+every collection on rename, silently: the set survives, and no query with the new
+path finds it. Same reason it is in `delete_clips_for_path`,
+`delete_clips_by_identity` and `rename_identity_nickname`.
+
+Deleting a set deletes its clips. The set is what was published, so it is what
+gets withdrawn; leaving members behind as loose public clips would mean the
+author's "delete" did not remove what they pointed at.
+
 ### `IDENTITY_SECRET` is a Secrets Store binding, not `ctx.secret()`
 
 It is declared as `[[secrets_store_secrets]]` in `wrangler.toml`, so it is read
@@ -203,7 +406,97 @@ Consequences that are easy to break:
 
 ## Frontend
 
-`static/admin.html` and `static/app.js` are plain inline JS, no build step.
+Plain HTML/CSS/JS, no build step. Each page is three files:
+
+| page | logic | styles |
+|---|---|---|
+| `index.html` (gallery + clip rank) | `app.js` | `style.css` |
+| `clip.html` | `clip.js` | `style.css` + `clip.css` |
+| `admin.html` | `admin.js` | `style.css` + `admin.css` |
+
+Plus `mp4clip.js`, loaded by both `index.html` and `clip.html` — **before** their
+own script in both, since they call into it at click time.
+
+`style.css` is shared and holds the tokens; `clip.css` / `admin.css` hold only
+what is page-specific. The split was mechanical (the tags were replaced by
+`<link>`/`<script src>` and the blocks dedented, nothing else), so page-local
+rules stayed page-local rather than being merged into the shared sheet.
+
+An external classic script has the same global scope as the inline one it
+replaced, so `'use strict'` at the top of each file still covers that whole file
+and top-level declarations are still shared across scripts on the page. Ordering
+is the thing to preserve, not scoping.
+
+One deployment consequence: `admin.js` and `admin.css` are now separate static
+assets rather than bytes inside `admin.html`. Cloudflare Access is what protects
+`/admin`, so confirm the application's path also covers them. Nothing in either
+file is a secret and the security boundary is unchanged — `verify_access_jwt`
+runs server-side on every `/admin/api/*` route — but the admin UI's source is
+worth keeping behind the same door as the page.
+
+### Page containers need an explicit `width: 100%`
+
+`body` is `display: flex; flex-direction: column`, so `.admin-container` and
+`.clip-container` are flex items. Their `margin: 0 auto` is an **auto margin on
+the cross axis**, which switches off `align-items: stretch` and leaves the box
+sized `fit-content` — and `fit-content` is floored by the widest child's
+*min-content* width. Any child that cannot wrap (a `nowrap` flex row, a long
+unbroken string) therefore widens the whole page and every section overflows a
+phone sideways.
+
+This was latent for as long as nothing had a min-content wider than a phone;
+the admin section nav (seven pills, deliberately `overflow-x: auto`) tripped it
+immediately — the page went to 579px inside a 390px viewport. `width: 100%`
+gives the flex item a definite cross size and pins it to the viewport;
+`min-width: 0` on the offending child does **not** fix it, and neither does
+dropping the `overflow-x` or the `position: sticky`.
+
+Check it the way it was found: load the page in a same-origin iframe sized to
+390px and compare `documentElement.scrollWidth` against `innerWidth`. Nothing
+else in this repo catches horizontal overflow.
+
+### Responsive bands, and `dvh` over `vh`
+
+Three bands, shared by all three pages: ≤640 phone, 641–1023 tablet, ≥1024
+desktop. Don't add a fourth — `style.css` already keys the gallery grid off the
+same numbers. Finger-sized hit targets are gated on `(pointer: coarse)`, not on
+width, so a narrow desktop window keeps its compact controls.
+
+Viewport-height units are `dvh`. iOS Safari's `vh` is the **large** viewport
+(address bar collapsed), so a `90vh` dialog still overflows while the bar is
+showing. Overlays scroll (`align-items: flex-start; overflow-y: auto`) and the
+dialog inside is capped in `dvh` — a centred flex child with no max-height puts
+the action row off-screen on a phone in landscape, unreachable.
+
+### `max-height: 100%` does not bound the preview player
+
+`.modal-media` is a flex item whose height comes from `flex-grow`, so it has no
+*definite* height and a percentage `max-height` on its child computes to `none`.
+Pair that with `width: 100%` and the video's height comes from its aspect ratio
+instead — 1300px wide ÷ 16:9 = 731px in a 709px box. The picture overflowed top
+and bottom the moment metadata arrived, and when the clip panel shrank the box
+to 530px the video stayed 731px and rode up off the top of the screen.
+
+The fix is `align-self: stretch` on the media element: it takes the height
+straight from the flex container, so it is always definite and always
+re-resolves when the clip panel opens or closes. `object-fit` then fits the
+picture inside that box — `contain` for video (upscaling to fill is what it
+already did), `scale-down` for images so a small image is not blown up.
+`.modal-media` also has `overflow: hidden` as a backstop, which is why
+`.media-unplayable` scrolls: it holds the download button, the only control on
+that screen, and clipping it would strand the user.
+
+Check this by measuring, not by looking. Open the modal in a same-origin
+iframe, play the video, toggle the clip panel, and compare
+`getBoundingClientRect()` on `.modal-media` and its `video` at each step — they
+must agree on `top` and `height` every time. A screenshot will not show you a
+22px overflow, and headless Chrome paints video unreliably anyway.
+
+The clip page's player and its time controls live in one sticky card. Splitting
+them looks tidier and is wrong: `⟵ 当前` reads the playhead, so it is useless
+when the player has scrolled away. On desktop that card is the sticky left
+column and needs `align-self: start` — a stretched grid item is as tall as its
+row and can never move inside its own containing block.
 
 The upload holds a Screen Wake Lock so a long transfer isn't killed by an idle
 screen timeout. The browser **releases that lock itself whenever the page stops

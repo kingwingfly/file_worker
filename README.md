@@ -97,11 +97,16 @@ npx wrangler deploy
 | GET | `/api/files?filter=&offset=&limit=` | List files from D1 |
 | GET | `/api/file/{key}` | Serve file from R2 (preview) |
 | GET | `/api/file/{key}?download=1` | Download file |
-| GET | `/api/proxy?file_path=` | List proxy videos for a file |
+| GET | `/api/proxy?file_path=` | List proxy videos for a file (feeds the gallery's source picker) |
+| GET | `/api/attachments?file_path=` | List a file's related files (subtitles, transcripts) |
+| GET | `/api/skill` | The clip-writing skill (`SKILL.md`); `?download=1` attaches it |
 | POST | `/api/identity` | Issue signed identity cookie `{nickname}` |
 | GET | `/api/identity/me` | Return current identity or null |
-| GET | `/api/clips?file_path=&sort=likes\|time` | List public clips |
+| GET | `/api/clips?file_path=&sort=likes\|time` | List public clips (set members included; filter on `set_id`) |
 | POST | `/api/clips` | Create a clip (needs identity cookie) |
+| GET | `/api/clip-sets?file_path=&sort=likes\|time` | List public clip sets, each with its clips inlined |
+| POST | `/api/clip-sets` | Publish a whole set `{file_path, name, description, clips[]}` |
+| DELETE | `/api/clip-sets/{id}` | Withdraw own set **and its clips** |
 | DELETE | `/api/clips/{id}` | Delete own clip |
 | PATCH | `/api/clips/{id}` | Toggle own clip public/private `{is_public}` |
 | POST | `/api/clips/{id}/like` | Like a clip (needs identity cookie) |
@@ -124,12 +129,62 @@ npx wrangler deploy
 | POST | `/admin/api/proxy/complete` | Finish proxy upload + D1 insert |
 | GET | `/admin/api/proxy?file_path=` | List proxies for a file (admin) |
 | DELETE | `/admin/api/proxy?key=` | Delete a proxy by R2 key |
+| POST | `/admin/api/attachment/start` | Start attachment upload `{file_path, filename, label}` |
+| POST | `/admin/api/attachment/complete` | Finish attachment upload + D1 insert |
+| GET | `/admin/api/attachment?file_path=` | List attachments for a file (admin) |
+| DELETE | `/admin/api/attachment?key=` | Delete an attachment by R2 key |
 | GET | `/admin/api/clips` | List all clips |
 | DELETE | `/admin/api/clips/{id}` | Delete any clip |
+| GET | `/admin/api/clip-sets` | List all clip sets |
+| DELETE | `/admin/api/clip-sets/{id}` | Delete any set **and its clips** |
 | POST | `/admin/api/clips/{id}/feature` | Toggle featured `{featured: bool}` |
 | GET | `/admin/api/clips/reports` | List unresolved reports |
 | POST | `/admin/api/clips/reports/{id}/resolve` | Resolve a report |
 | DELETE | `/admin/api/identity/{id}/clips` | Batch-delete all clips by identity |
+
+### Clip export never touches the server
+
+Two ways to get a clip out, both entirely client-side:
+
+- **⬇ 一键下载** cuts the MP4 in the browser and saves the file. It reads the
+  original's index over Range requests, works out which bytes the time window
+  needs, fetches only those, and writes a new container around them — a
+  **remux**, not a transcode, so the compressed video is copied unchanged and a
+  20-second clip out of a 40 GB source moves about 20 seconds of bytes. A batch
+  (a whole 归档) comes back as one store-only ZIP. See `static/mp4clip.js`.
+- **The ffmpeg command** stays next to it, for anything the browser declines
+  (fragmented MP4, a clip too large to hold in memory) and for scripting.
+
+Both cut on a keyframe — a frame mid-GOP cannot be decoded without the ones
+before it — so both produce the same clip, starting at or slightly before the
+mark. The UI reports the real start time before you commit. `-g` at encode time
+sets how much "slightly" is.
+
+The worker does no transcoding, no concatenation and no clip-specific work at
+all: the browser is making the same ranged `GET /api/file/{key}` requests the
+player already makes.
+
+### AI-assisted clip lists
+
+The clip page's 🤖 AI 辅助 section hands out the two inputs an LLM needs and
+takes back the result through the import path that already existed:
+
+1. **⬇ 下载 skill / 📋 复制 skill** — `SKILL.md`, a standard Agent Skill
+   (`name: clip-description`) served straight from the repo at `/api/skill`, so
+   it cannot drift from the copy in git. It downloads under its conventional
+   filename, ready to drop into `~/.claude/skills/clip-description/`.
+2. **📎 关联文件** — subtitles, transcripts or anything else an admin attached to
+   the video, uploaded from the admin page's `📎 关联文件` mode and downloaded
+   here. Timestamps come from these; without one an AI is guessing.
+3. The AI returns the YAML this README's skill file specifies, and it goes in
+   through 暂存区 → **📥 导入 YAML**, unchanged.
+
+Attachments download through the same public `/api/file/{key}?download=1` route
+as everything else — no new serving path, and the stored type is clamped to
+`application/octet-stream`, so nothing an admin uploads can execute on the
+origin `/admin` lives on. They are download-only by design: `.srt` in the wild
+is frequently GBK or Shift-JIS, so a copy-to-clipboard button would silently
+mojibake half the world's subtitles.
 
 ### Two names per file
 
@@ -153,6 +208,13 @@ etags stay in `localStorage` — so a 40 GB transfer that dies at 90% resumes fr
 A resume after a page reload needs the same file re-selected from disk: a `File`
 handle cannot be persisted, and resuming with a different file would splice
 foreign bytes into the object. Name, size and last-modified must all match.
+
+The upload section has three modes. **普通文件** uploads a new object; **代理**
+attaches a low-quality playback source (360p, audio-only, …) to a file that
+already exists, picked from a dropdown; **关联文件** attaches a downloadable
+related file (subtitles, a transcript) the same way. All three run through the
+same uploader, so both attach modes get resume, progress and the wake lock too.
+The 代理与关联文件 section lists and deletes both; it no longer uploads them.
 
 **Set an R2 lifecycle rule to abort incomplete multipart uploads** (7 days is
 reasonable) in the bucket's dashboard settings. *放弃并清理* aborts the one
@@ -230,9 +292,13 @@ Flags that matter for playback through this worker specifically:
 - **`-movflags +faststart`** — moves the `moov` atom to the front. Without it the
   player must fetch the tail before it can start, so playback stalls until most
   of the file has downloaded. Applies to every codec.
-- **`-g 48`** — a keyframe every ~2s bounds how precisely a seek can land. The
-  worker's HTTP Range support (`206` on `/api/file/{key}`) is what turns a seek
-  into a small ranged fetch instead of a full download.
+- **`-g 48`** — a keyframe every ~2s bounds how precisely a seek can land, and
+  also how precisely a clip can *start*: both the one-click download and the
+  ffmpeg command cut on a keyframe, so a longer GOP means a clip that begins
+  further before the mark that was set. The worker's HTTP Range support (`206`
+  on `/api/file/{key}`) is what turns a seek into a small ranged fetch instead
+  of a full download — and is what makes the in-browser clipping possible at
+  all.
 
 `-c:a copy` keeps the source's audio codec. If your sources aren't uniform, use
 `-c:a aac -b:a 192k` — Opus in MP4, for example, will not play in Safari, and
@@ -253,17 +319,22 @@ year-long `immutable` cache correct.
 file_worker/
 ├── Cargo.toml
 ├── wrangler.toml
+├── SKILL.md             # Agent Skill: writing clip descriptions, served at /api/skill
 ├── migrations/          # D1 migrations
 ├── src/
 │   ├── lib.rs           # Worker entry + Router
 │   ├── auth.rs          # Cloudflare Access JWT verification
 │   ├── cors.rs          # CORS headers
 │   └── db.rs            # D1 operations
-├── static/
-│   ├── index.html       # Public gallery
+├── static/            # no build step — plain HTML/CSS/JS, served by [assets]
+│   ├── index.html       # Public gallery + clip rank
+│   ├── app.js           #   its logic
+│   ├── clip.html        # Clipping page
+│   ├── clip.js / .css   #   its logic and styles
 │   ├── admin.html       # Admin upload page
-│   ├── style.css        # Cat-themed styles
-│   └── app.js           # Gallery logic
+│   ├── admin.js / .css  #   its logic and styles
+│   ├── mp4clip.js       # In-browser MP4 cutting (remux, no re-encode)
+│   └── style.css        # Shared cat-themed styles
 └── README.md
 ```
 

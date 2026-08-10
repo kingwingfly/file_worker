@@ -1,0 +1,322 @@
+/* ── Page shell ──
+   Three bands, matching style.css's existing breakpoints rather than
+   inventing new ones: ≤640 phone, 641–1023 tablet, ≥1024 two columns. */
+/* width:100% for the same reason as .admin-container: an auto cross-axis
+   margin on a flex item of the column-flex body disables stretch, leaving
+   fit-content, which a wide min-content child can push past the viewport. */
+.clip-container { width: 100%; max-width: 1180px; margin: 0 auto; padding: 1.25rem 1.5rem 2rem; }
+
+.clip-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 1rem; }
+.clip-header h2 { font-size: 1.05rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.back-link { color: var(--pink); text-decoration: none; font-weight: 600; font-size: 0.85rem; white-space: nowrap;
+             background: var(--white); border-radius: 999px; padding: 0.35rem 0.85rem; box-shadow: var(--shadow); transition: var(--transition); }
+.back-link:hover { background: var(--light-pink); color: var(--text); }
+
+.clip-layout { display: grid; grid-template-columns: 1fr; gap: 1rem; align-items: start; }
+.clip-side { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+
+.clip-section { background: var(--white); border-radius: var(--radius); padding: 1.1rem 1.15rem; box-shadow: var(--shadow); min-width: 0; }
+.clip-section h3 { font-size: 0.98rem; margin-bottom: 0.7rem; display: flex; align-items: center; gap: 0.4rem;
+                   padding-left: 0.6rem; border-left: 4px solid var(--pink); line-height: 1.35; }
+.h3-count { font-weight: 400; font-size: 0.82rem; color: var(--text-light); }
+
+/* ── Stage: player + workspace in one card ──
+   They belong together: `⟵ 当前` means nothing if the playhead is scrolled
+   off screen, which is why the workspace rides in the sticky column too. */
+.clip-stage { min-width: 0; }
+.stage-card { padding: 0.85rem 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; }
+
+.stage-bar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.stage-bar .proxy-selector { flex: 1; min-width: 0; margin: 0; }
+/* No margin-left:auto — the proxy selector next to it is flex:1 and
+   pushes it right on its own. When there are no proxies the selector is
+   hidden and the toggle sits left, reading as the card's own control
+   rather than a button stranded at the end of an empty row. */
+.btn-icon { flex-shrink: 0; width: 2rem; height: 2rem; display: flex; align-items: center; justify-content: center;
+            border: 1px solid var(--border-strong); background: var(--white); border-radius: 999px;
+            font-size: 0.75rem; color: var(--text-light); cursor: pointer; transition: var(--transition); }
+.btn-icon:hover { background: var(--muted-bg); border-color: var(--soft-blue); }
+/* Collapsing the picture keeps the time controls reachable on a phone
+   without the video eating half the viewport. */
+.clip-stage.collapsed .preview-area { display: none; }
+.clip-stage.collapsed .btn-icon { transform: rotate(-90deg); }
+
+.preview-area { background: #101010; border-radius: var(--radius-sm); overflow: hidden; }
+.preview-area video { width: 100%; display: block; max-height: 56vh; background: #101010; outline: none; }
+.preview-area audio { width: 100%; display: block; padding: 1rem; }
+.preview-fallback { color: var(--text-light); text-align: center; padding: 0.5rem; font-size: 0.82rem; }
+.note-switch { border: 1px solid var(--soft-blue); background: var(--white); color: var(--text);
+               border-radius: 999px; padding: 0.2rem 0.7rem; font-size: 0.78rem; font-family: inherit;
+               cursor: pointer; transition: var(--transition); white-space: nowrap; }
+.note-switch:hover { background: var(--soft-blue); }
+
+.proxy-selector { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.proxy-selector label { font-size: 0.8rem; font-weight: 600; white-space: nowrap; color: var(--text-light); }
+.proxy-selector select { flex: 1; min-width: 8rem; max-width: 100%; padding: 0.3rem 0.5rem; border: 2px solid var(--soft-blue);
+                         border-radius: var(--radius-sm); font-size: 0.85rem; background: var(--white); }
+.proxy-selector select:focus { border-color: var(--pink); outline: none; }
+
+/* ── Workspace ── */
+.workspace { display: flex; flex-direction: column; gap: 0.55rem; }
+/* auto-fit: two fields side by side wherever ~15rem each fits, stacked
+   below that, with no width query of its own. */
+.ws-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.5rem; }
+.ws-field { display: flex; align-items: center; gap: 0.4rem; background: var(--muted-bg);
+            border: 1px solid var(--border); border-radius: 999px; padding: 0.25rem 0.3rem 0.25rem 0.8rem; }
+.ws-field > label { font-size: 0.82rem; font-weight: 600; color: var(--text-light); white-space: nowrap; }
+.ws-field input[type="text"] { flex: 1; min-width: 0; padding: 0.35rem 0.4rem; border: 2px solid transparent;
+                               background: var(--white); border-radius: 999px; font-size: 0.9rem;
+                               font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; color: var(--text); }
+.ws-field input:focus { border-color: var(--pink); outline: none; }
+.ws-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.ws-hint { font-size: 0.78rem; color: var(--text-light); }
+
+.btn-ws { padding: 0.4rem 0.85rem; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--white);
+          color: var(--text); font-size: 0.82rem; font-weight: 500; cursor: pointer; transition: var(--transition); white-space: nowrap; }
+.btn-ws:hover { background: var(--muted-bg); border-color: var(--soft-blue); }
+.btn-ws:active { transform: scale(0.97); }
+.btn-ws.primary { background: var(--pink); color: var(--white); border-color: var(--pink); }
+.btn-ws.primary:hover { background: #FF9AAF; border-color: #FF9AAF; }
+.btn-ws.danger { color: var(--danger); border-color: var(--danger-border); }
+.btn-ws.danger:hover { background: var(--danger-bg); }
+
+/* ── Clip cards ──
+   Flex, not grid: the renderers append a varying number of children (a
+   badge is added only sometimes, and `我的` lands *after* the action row),
+   so the layout has to tolerate any child count. `order` fixes the visual
+   sequence regardless of DOM order. */
+.clip-card { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap;
+             padding: 0.5rem 0.65rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+             margin-bottom: 0.4rem; background: var(--white); font-size: 0.85rem; transition: var(--transition); }
+.clip-card:last-child { margin-bottom: 0; }
+.clip-card:hover { border-color: var(--soft-blue); box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+.clip-card-name { font-weight: 600; flex: 1 1 7rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-card-time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.76rem; color: var(--text-light);
+                  background: var(--muted-bg); border-radius: 999px; padding: 0.12rem 0.5rem; white-space: nowrap; }
+/* The description used to live only in `title=`, which is invisible on a
+   phone and easy to miss anywhere. `order: 10` drops it onto its own line
+   below the action row while the DOM keeps it next to the name, so reading
+   order stays sensible; `flex-basis: 100%` is what forces the wrap.
+   Clamped to two lines — a 500-char description would otherwise bury the
+   list it belongs to, and the full text stays in the tooltip. */
+.clip-card-desc { order: 10; flex-basis: 100%; margin-top: 0.15rem;
+                  font-size: 0.78rem; line-height: 1.45; color: var(--text-light);
+                  overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical;
+                  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.clip-card .badge { order: 8; }
+.clip-card-actions { order: 9; display: flex; gap: 0.2rem; flex-shrink: 0; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.clip-card-actions button { min-width: 1.9rem; padding: 0.25rem 0.45rem; border-radius: 999px; border: 1px solid var(--border-strong);
+                            background: var(--white); font-size: 0.78rem; cursor: pointer; transition: var(--transition); white-space: nowrap; }
+.clip-card-actions button:hover { background: var(--muted-bg); border-color: var(--soft-blue); transform: translateY(-1px); }
+.empty-hint { text-align: center; color: var(--text-light); font-size: 0.85rem; padding: 1.1rem 0.5rem;
+              border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
+
+/* ── AI assist ──
+   `.btn-ws` is written for <button>; the skill download is an <a> so the
+   browser handles the transfer and the `download` attribute names the file.
+   An anchor needs the text-decoration and box model spelled out to match. */
+a.btn-ws { display: inline-block; text-decoration: none; line-height: 1.4; }
+.ai-note { font-size: 0.8rem; line-height: 1.5; color: var(--text-light); margin-bottom: 0.65rem; }
+.ai-sub { font-size: 0.85rem; margin: 0.9rem 0 0.45rem; display: flex; align-items: center; gap: 0.35rem; }
+
+.attachment-row { display: flex; align-items: center; gap: 0.5rem;
+                  padding: 0.5rem 0.65rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+                  margin-bottom: 0.4rem; background: var(--white); transition: var(--transition); }
+.attachment-row:last-child { margin-bottom: 0; }
+.attachment-row:hover { border-color: var(--soft-blue); box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+/* min-width: 0 so the filename below can actually ellipsise — a flex item's
+   default min-width is auto, which is floored by its content. */
+.attachment-meta { display: flex; flex-direction: column; gap: 0.1rem; flex: 1 1 auto; min-width: 0; }
+.attachment-label { font-weight: 600; font-size: 0.85rem; overflow-wrap: anywhere; }
+.attachment-sub { font-size: 0.75rem; color: var(--text-light);
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Collapsible ── */
+.collapsible-header { cursor: pointer; user-select: none; }
+.collapsible-header .arrow { display: inline-block; transition: transform 0.2s; font-size: 0.7rem; }
+.collapsible-header.open .arrow { transform: rotate(90deg); }
+.section-actions { display: flex; gap: 0.35rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+
+.badge { display: inline-block; font-size: 0.7rem; padding: 0.15rem 0.45rem; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+.badge-featured { background: var(--warn-bg); color: var(--warn); }
+.badge-own { background: #E8DAEF; color: #7D3C98; }
+
+/* ── Archive / shared sets ──
+   Archive is a list of named sets, not a flat clip list — the set is the
+   unit you name, export, publish and reload, which is what makes 归档 a
+   real step instead of a relabelling of 暂存. */
+.archive-set { border: 1px solid var(--soft-blue); border-radius: var(--radius-sm); margin-bottom: 0.55rem; overflow: hidden; transition: var(--transition); }
+.archive-set:last-child { margin-bottom: 0; }
+.archive-set.open { border-color: var(--pink); box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.archive-set-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 0.6rem 0.75rem; background: var(--muted-bg); cursor: pointer; transition: var(--transition); }
+.archive-set-head:hover { background: #EEF6FB; }
+.archive-set-head .arrow { transition: var(--transition); font-size: 0.75rem; color: var(--text-light); flex-shrink: 0; }
+.archive-set.open .archive-set-head .arrow { transform: rotate(90deg); }
+.archive-set-name { font-weight: 600; flex: 1 1 8rem; min-width: 0; word-break: break-word; }
+.archive-set-meta { font-size: 0.78rem; color: var(--text-light); white-space: nowrap; }
+.archive-set-head .badge { order: 8; }
+.archive-set-head .clip-card-actions { order: 9; }
+.archive-set-desc { font-size: 0.8rem; color: var(--text-light); padding: 0 0.75rem 0.5rem; background: var(--muted-bg); word-break: break-word; }
+.archive-set-body { padding: 0.5rem 0.55rem; }
+.shared-sep { font-size: 0.8rem; color: var(--text-light); margin: 0.9rem 0 0.45rem; padding-left: 0.5rem; border-left: 3px solid var(--pink); }
+.shared-meta { font-size: 0.75rem; color: var(--text-light); }
+.staging-origin { font-size: 0.78rem; color: var(--text-light); background: #F4FAFF; border-left: 3px solid var(--soft-blue);
+                  border-radius: var(--radius-sm); padding: 0.45rem 0.65rem; margin-bottom: 0.6rem; }
+
+.sort-toggle { display: inline-flex; gap: 0.15rem; margin-bottom: 0.6rem; background: var(--muted-bg); border-radius: 999px; padding: 0.15rem; }
+.sort-toggle button { padding: 0.3rem 0.8rem; border-radius: 999px; border: none; background: transparent;
+                      color: var(--text-light); font-size: 0.78rem; font-weight: 500; cursor: pointer; transition: var(--transition); }
+.sort-toggle button:hover { color: var(--text); }
+.sort-toggle button.active { background: var(--pink); color: var(--white); box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+
+/* ── Modals ──
+   The overlay scrolls, not just the dialog: a 14rem textarea plus three
+   buttons is taller than a phone in landscape, and a centred flex child
+   with nowhere to go puts the action row off-screen with no way to reach
+   it. dvh because iOS Safari's vh is the *large* viewport. */
+.identity-overlay, .export-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 9999;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 1.5rem 0.75rem; overflow-y: auto; overscroll-behavior: contain;
+  animation: clipFade 0.18s ease-out;
+}
+.identity-overlay { background: rgba(0,0,0,0.55); z-index: 10000; }
+@keyframes clipFade { from { opacity: 0; } to { opacity: 1; } }
+
+.identity-dialog, .export-dialog {
+  background: var(--white); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,0.22);
+  width: 100%; margin: auto; max-height: calc(100dvh - 3rem); overflow-y: auto;
+  animation: clipRise 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+@keyframes clipRise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+.identity-dialog { max-width: 400px; padding: 1.75rem; }
+.export-dialog { max-width: 620px; --dlg-pad: 1.35rem; padding: var(--dlg-pad); }
+.identity-dialog h3, .export-dialog h3 { margin-bottom: 0.7rem; font-size: 1.05rem; }
+.dialog-note { font-size: 0.85rem; color: var(--text-light); margin-bottom: 0.6rem; }
+.dialog-note.fine { font-size: 0.75rem; }
+
+.identity-dialog input[type="text"] { width: 100%; padding: 0.6rem 0.8rem; border: 2px solid var(--soft-blue); border-radius: var(--radius-sm); font-size: 0.95rem; }
+.identity-dialog input:focus, .commit-name:focus, .commit-desc:focus, .import-text:focus {
+  border-color: var(--pink); outline: none; box-shadow: 0 0 0 3px rgba(255,182,193,0.2); }
+.identity-dialog label { display: flex; align-items: center; gap: 0.45rem; font-size: 0.85rem; margin: 0.85rem 0; cursor: pointer; }
+.identity-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+.btn-confirm { flex: 1; padding: 0.65rem; border-radius: 999px; border: none; background: var(--pink); color: var(--white);
+               font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: var(--transition); }
+.btn-confirm:hover { background: #FF9AAF; }
+.btn-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-confirm.ghost { background: #F0F0F0; color: var(--text); }
+.btn-confirm.ghost:hover { background: #E4E4E4; }
+
+.export-cmd { background: #16181D; color: #7BE38B; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem;
+              padding: 0.8rem; border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-all;
+              margin-bottom: 0.75rem; max-height: 11rem; overflow: auto; line-height: 1.5; }
+.import-text { width: 100%; min-height: 12rem; resize: vertical; padding: 0.75rem; border: 2px solid var(--soft-blue);
+               border-radius: var(--radius-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
+               line-height: 1.55; white-space: pre; overflow-wrap: normal; overflow-x: auto; margin-bottom: 0.5rem; color: var(--text); }
+.import-error { font-size: 0.8rem; color: var(--danger); background: #FDECEA; border-radius: var(--radius-sm); padding: 0.5rem 0.75rem; margin-bottom: 0.75rem; }
+.commit-name, .commit-desc { width: 100%; padding: 0.6rem 0.75rem; border: 2px solid var(--soft-blue); border-radius: var(--radius-sm);
+                             font-size: 0.9rem; margin-bottom: 0.6rem; font-family: inherit; color: var(--text); }
+.commit-desc { min-height: 5rem; resize: vertical; }
+
+/* The one-click block sits above the ffmpeg command and owns the dialog's
+   primary action. `.quick-dl .btn-export` overrides the flex-grow the action
+   row gives its buttons — this one is alone on its line and should fill it. */
+.quick-dl { background: var(--muted-bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+            padding: 0.85rem; margin-bottom: 0.9rem; }
+.quick-dl .btn-export { width: 100%; flex: none; }
+.quick-dl .dialog-note { margin: 0.55rem 0 0; }
+.quick-dl .dialog-note.warn { color: var(--warn); }
+.quick-dl .dialog-note.bad { color: var(--danger); }
+.quick-bar { height: 6px; border-radius: 999px; background: var(--border-strong); overflow: hidden; margin-top: 0.55rem; }
+.quick-bar span { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--pink); transition: width 0.15s linear; }
+/* <details> keeps the command one click away without spending the dialog's
+   vertical budget on it — which matters most on the short-viewport rules
+   further down, where every row competes for the same screen. */
+.export-adv { margin-bottom: 0.9rem; }
+.export-adv > summary { cursor: pointer; font-size: 0.82rem; color: var(--text-light); padding: 0.3rem 0; list-style: revert; }
+.export-adv > summary:hover { color: var(--text); }
+.export-adv .btn-export { width: 100%; flex: none; }
+
+/* Pinned to the bottom of the scroll box. The dialog caps at `dvh` and
+   scrolls its own content, so before this the action row sat below the fold
+   on a short viewport and 关闭 had to be scrolled to — and the one-click
+   block above made the content taller, so it started happening at heights
+   where it never used to. The negative margin plus matching padding lets
+   the background cover the full dialog width. */
+.export-actions { display: flex; gap: 0.5rem; flex-wrap: wrap;
+                  position: sticky; bottom: calc(var(--dlg-pad, 1.35rem) * -1); background: var(--white);
+                  margin: 0 calc(var(--dlg-pad, 1.35rem) * -1) calc(var(--dlg-pad, 1.35rem) * -1);
+                  padding: 0.6rem var(--dlg-pad, 1.35rem) var(--dlg-pad, 1.35rem); }
+.btn-export { flex: 1 1 auto; padding: 0.55rem 1rem; border-radius: 999px; border: none; font-weight: 600; font-size: 0.85rem;
+              cursor: pointer; transition: var(--transition); }
+.btn-export.copy { background: var(--soft-blue); color: var(--text); }
+.btn-export.copy:hover { background: #9AD8F0; }
+.btn-export.dl { background: var(--pink); color: var(--white); }
+.btn-export.dl:hover { background: #FF9AAF; }
+.btn-export.close { background: #F0F0F0; color: var(--text); }
+.btn-export.close:hover { background: #E4E4E4; }
+
+/* ── ≥1024: two columns, player pinned ──
+   align-self:start is load-bearing — a stretched grid item is as tall as
+   its row, and a sticky box can never move inside its own container. */
+@media (min-width: 1024px) {
+  .clip-layout { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 1.15rem; }
+  .clip-stage { position: sticky; top: 1rem; align-self: start; }
+  .preview-area video { max-height: calc(100vh - 22rem); min-height: 14rem; }
+}
+
+/* ── <1024: single column, stage pinned to the top edge ──
+   Scrolling the staging list without losing the player is the whole point;
+   the cap stops a tall stage from owning the screen on a short phone. */
+@media (max-width: 1023px) {
+  .clip-stage { position: sticky; top: 0; z-index: 20; }
+  .stage-card { border-radius: 0 0 var(--radius) var(--radius); box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+                max-height: 62dvh; overflow-y: auto; }
+  .preview-area video { max-height: 34dvh; }
+}
+
+@media (max-width: 640px) {
+  .clip-container { padding: 0.75rem 0.75rem 1.5rem; }
+  .clip-header { margin-bottom: 0.75rem; }
+  .clip-section { padding: 0.9rem 0.85rem; border-radius: var(--radius-sm); }
+  .stage-card { padding: 0.65rem 0.7rem; }
+  .clip-card { gap: 0.35rem; }
+  /* Seven action buttons will not share a line with a name on a 360px
+     screen, so give them one of their own. */
+  .clip-card-actions, .archive-set-head .clip-card-actions { flex-basis: 100%; margin-left: 0; }
+  .ws-actions .btn-ws { flex: 1 1 auto; text-align: center; }
+  .identity-dialog { padding: 1.25rem; }
+  .export-dialog { --dlg-pad: 1rem; }
+  .identity-overlay, .export-overlay { padding: 0.75rem 0.5rem; }
+  .export-actions .btn-export { flex: 1 1 100%; }
+}
+
+/* A phone held sideways is ~390px tall. The dialog scrolls, but a 12rem
+   textarea plus a note means the action row starts below the fold every
+   time — shrink the tall parts instead of making people scroll to reach
+   the buttons. Keyed on height, so it also covers a portrait phone with
+   the keyboard up. */
+@media (max-height: 560px) {
+  .identity-overlay, .export-overlay { padding: 0.5rem; }
+  .identity-dialog { padding: 1rem; }
+  .export-dialog { --dlg-pad: 0.9rem; }
+  .identity-dialog, .export-dialog { max-height: calc(100dvh - 1rem); }
+  .import-text { min-height: 6.5rem; }
+  .export-cmd { max-height: 6.5rem; }
+  .commit-desc { min-height: 3.5rem; }
+  /* Only the ffmpeg footnote, which is why this is scoped to `.export-adv`
+     and not to the dialog. Two other `.dialog-note.fine` elements must
+     survive: the identity dialog's is the disclosure for the consent
+     checkbox right above it, and `.quick-dl`'s is the one-click status
+     line — clip size, keyframe warning and every error land there, so
+     hiding it turns a failed cut into a button that does nothing. */
+  .export-adv .dialog-note.fine { display: none; }
+}
+
+@media (pointer: coarse) {
+  .btn-ws, .btn-export, .btn-confirm, .sort-toggle button, .btn-icon { min-height: 40px; }
+  .clip-card-actions button { min-height: 36px; min-width: 2.4rem; }
+  .ws-field input[type="text"] { min-height: 34px; }
+  .proxy-selector select { min-height: 36px; }
+}

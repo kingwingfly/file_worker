@@ -248,6 +248,131 @@ pub async fn delete_proxy_by_key(
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
+// ── File attachment records ──
+//
+// Subtitles, transcripts, notes — files an admin binds to a video for viewers
+// to download. Structurally a twin of `proxy_videos` (many per `files.path`,
+// one R2 object each) with one extra column: `filename`. A proxy is only ever
+// played, so its opaque key is enough; an attachment is downloaded, and
+// `/api/file/{key}?download=1` has no way to derive a display name from a key.
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AttachmentRecord {
+    pub file_path: String,
+    pub key: String,
+    pub label: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+    pub uploaded_at: String,
+}
+
+const ATTACHMENT_COLUMNS: &str =
+    "file_path, key, label, filename, content_type, size, uploaded_at";
+
+pub async fn insert_attachment(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+    key: &str,
+    label: &str,
+    filename: &str,
+    content_type: &str,
+    size: i64,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare(
+        "INSERT INTO file_attachments (file_path, key, label, filename, content_type, size, uploaded_at) \
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+    )
+    .bind(&[
+        JsValue::from(&D1Type::Text(file_path)),
+        JsValue::from(&D1Type::Text(key)),
+        JsValue::from(&D1Type::Text(label)),
+        JsValue::from(&D1Type::Text(filename)),
+        JsValue::from(&D1Type::Text(content_type)),
+        // Real, not Integer — D1Type has no 64-bit int and an attachment is not
+        // guaranteed to be small (a transcript bundle, a reference render).
+        JsValue::from(&D1Type::Real(size as f64)),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+/// List every attachment bound to a file path, newest first.
+pub async fn list_attachments(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<Vec<AttachmentRecord>> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare(&format!(
+            "SELECT {ATTACHMENT_COLUMNS} FROM file_attachments WHERE file_path = ? ORDER BY uploaded_at DESC"
+        ))
+        .bind(&[JsValue::from(&D1Type::Text(file_path))])?
+        .all()
+        .await?;
+    result.results::<AttachmentRecord>()
+}
+
+/// Every attachment R2 key bound to a file path.
+///
+/// Same role as `list_proxy_keys`: once the `files` row is gone nothing can
+/// enumerate these objects again, so file-delete has to collect them first.
+pub async fn list_attachment_keys(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<Vec<String>> {
+    Ok(list_attachments(ctx, file_path)
+        .await?
+        .into_iter()
+        .map(|a| a.key)
+        .collect())
+}
+
+/// Drop every attachment row for a file path (the R2 objects are the caller's job).
+pub async fn delete_attachments_for_path(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare("DELETE FROM file_attachments WHERE file_path = ?")
+        .bind(&[JsValue::from(&D1Type::Text(file_path))])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// Does an attachment row exist for this R2 key?
+///
+/// The same guard as `proxy_exists`, for the same reason: `DELETE
+/// /admin/api/attachment?key=` deletes an R2 object, and without the lookup
+/// `?key=uploads/…/video.mp4` would delete a source file's bytes and leave its
+/// `files` row pointing at nothing.
+pub async fn attachment_exists(ctx: &worker::RouteContext<()>, key: &str) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let found = db
+        .prepare("SELECT COUNT(*) AS cnt FROM file_attachments WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(key))])?
+        .first::<i32>(Some("cnt"))
+        .await?;
+    Ok(found.unwrap_or(0) > 0)
+}
+
+/// Delete an attachment by its R2 key.
+pub async fn delete_attachment_by_key(
+    ctx: &worker::RouteContext<()>,
+    key: &str,
+) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare("DELETE FROM file_attachments WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(key))])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}
+
 // ── Clip records ──
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,6 +392,44 @@ pub struct ClipRecord {
     /// clip. The client needs this to pick POST vs DELETE on the like button —
     /// without it there is no way to tell the two states apart.
     pub liked: Option<i32>,
+    /// The clip set this clip belongs to, or `None` for a clip published on its
+    /// own. Pure grouping — `is_public` alone decides visibility.
+    pub set_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// The R2 object key of the file this clip points into, resolved through
+    /// `files.path`. A clip stores only the *display path*, which is the mutable
+    /// name — so a caller that has a clip and wants to play or cut it has no way
+    /// to build a `/api/file/{key}` URL without this. Everything on the clip page
+    /// already knows the key from its own query string; the gallery's clip rank
+    /// lists clips across every file and does not.
+    ///
+    /// `Option` because the join is a `LEFT JOIN`: a clip whose file was deleted
+    /// out from under it still lists, with playback unavailable rather than the
+    /// whole query failing.
+    pub file_key: Option<String>,
+    pub file_content_type: Option<String>,
+    /// Needed by the clip page's `&size=` ranking, and by the export dialog to
+    /// say how big the cut will be before it starts.
+    pub file_size: Option<f64>,
+}
+
+/// A named group of clips, published as one unit.
+///
+/// `like_count` is the **sum** of the member clips' likes, not a set-level like
+/// count — there is no `clip_set_likes` table. `clip_count` counts only public
+/// members, so a set whose clips were individually unpublished reads as empty
+/// rather than advertising clips a viewer cannot see.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClipSetRecord {
+    pub id: String,
+    pub file_path: String,
+    pub identity: String,
+    pub nickname: String,
+    pub name: String,
+    pub description: String,
+    pub clip_count: Option<i32>,
+    pub like_count: Option<i32>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -276,8 +439,19 @@ pub struct ClipRecord {
 /// `liked` binds the viewer's identity, so it is always the **first** bound
 /// parameter of any query built on top of this fragment.
 const CLIP_COLUMNS: &str = "c.*, (SELECT COUNT(*) FROM clip_likes WHERE clip_id = c.id) AS like_count, \
-     EXISTS(SELECT 1 FROM clip_likes WHERE clip_id = c.id AND identity = ?) AS liked";
+     EXISTS(SELECT 1 FROM clip_likes WHERE clip_id = c.id AND identity = ?) AS liked, \
+     f.key AS file_key, f.content_type AS file_content_type, f.size AS file_size";
 
+/// The `FROM` that `CLIP_COLUMNS` is written against.
+///
+/// A `LEFT JOIN`, not an inner one: a clip whose file has been deleted should
+/// still appear in its author's list (so they can see it and remove it) rather
+/// than silently vanish from every query. `files.path` is UNIQUE
+/// (`idx_files_path`), so this is an index lookup per row, not a scan — the same
+/// index the upload hot path depends on.
+const CLIP_FROM: &str = "FROM clips c LEFT JOIN files f ON f.path = c.file_path";
+
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_clip(
     ctx: &worker::RouteContext<()>,
     id: &str,
@@ -289,11 +463,12 @@ pub async fn insert_clip(
     start_time: f64,
     end_time: f64,
     is_public: bool,
+    set_id: Option<&str>,
 ) -> Result<()> {
     let db = ctx.d1("DB")?;
     db.prepare(
-        "INSERT INTO clips (id, file_path, identity, nickname, name, description, start_time, end_time, is_public, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+        "INSERT INTO clips (id, file_path, identity, nickname, name, description, start_time, end_time, is_public, set_id, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
     )
     .bind(&[
         JsValue::from(&D1Type::Text(id)),
@@ -305,10 +480,173 @@ pub async fn insert_clip(
         JsValue::from(&D1Type::Real(start_time)),
         JsValue::from(&D1Type::Real(end_time)),
         JsValue::from(&D1Type::Integer(if is_public { 1 } else { 0 })),
+        match set_id {
+            Some(s) => JsValue::from(&D1Type::Text(s)),
+            None => JsValue::from(&D1Type::Null),
+        },
     ])?
     .run()
     .await?;
     Ok(())
+}
+
+// ── Clip sets ──
+
+/// `like_count` sums the member clips' likes; `clip_count` counts public members.
+/// `viewer` is unused here (sets carry no per-viewer state) but the parameter
+/// order of the clip queries is kept for symmetry at the call sites.
+const CLIP_SET_COLUMNS: &str = "s.id, s.file_path, s.identity, s.nickname, s.name, s.description, \
+     s.created_at, s.updated_at, \
+     (SELECT COUNT(*) FROM clips WHERE set_id = s.id AND is_public = 1) AS clip_count, \
+     (SELECT COUNT(*) FROM clip_likes WHERE clip_id IN \
+        (SELECT id FROM clips WHERE set_id = s.id AND is_public = 1)) AS like_count";
+
+pub async fn insert_clip_set(
+    ctx: &worker::RouteContext<()>,
+    id: &str,
+    file_path: &str,
+    identity: &str,
+    nickname: &str,
+    name: &str,
+    description: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare(
+        "INSERT INTO clip_sets (id, file_path, identity, nickname, name, description, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+    )
+    .bind(&[
+        JsValue::from(&D1Type::Text(id)),
+        JsValue::from(&D1Type::Text(file_path)),
+        JsValue::from(&D1Type::Text(identity)),
+        JsValue::from(&D1Type::Text(nickname)),
+        JsValue::from(&D1Type::Text(name)),
+        JsValue::from(&D1Type::Text(description)),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+pub async fn get_clip_set(
+    ctx: &worker::RouteContext<()>,
+    id: &str,
+) -> Result<Option<ClipSetRecord>> {
+    let db = ctx.d1("DB")?;
+    db.prepare(&format!(
+        "SELECT {CLIP_SET_COLUMNS} FROM clip_sets s WHERE s.id = ?"
+    ))
+    .bind(&[JsValue::from(&D1Type::Text(id))])?
+    .first::<ClipSetRecord>(None)
+    .await
+}
+
+/// List clip sets that still have at least one public clip.
+///
+/// A set with nothing public left is dead weight in the shared area — its author
+/// unpublished every member — so it is filtered out rather than shown empty.
+pub async fn list_clip_sets(
+    ctx: &worker::RouteContext<()>,
+    file_path: Option<&str>,
+    sort: &str,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<ClipSetRecord>> {
+    let db = ctx.d1("DB")?;
+
+    let where_clause = if file_path.is_some() {
+        "WHERE s.file_path = ? "
+    } else {
+        ""
+    };
+    let order = match sort {
+        "likes" => "ORDER BY like_count DESC, s.created_at DESC ",
+        _ => "ORDER BY s.created_at DESC ",
+    };
+    let query = format!(
+        "SELECT {CLIP_SET_COLUMNS} FROM clip_sets s {where_clause}\
+         GROUP BY s.id HAVING clip_count > 0 {order}LIMIT ? OFFSET ?"
+    );
+
+    let mut params: Vec<JsValue> = Vec::new();
+    if let Some(path) = file_path {
+        params.push(JsValue::from(&D1Type::Text(path)));
+    }
+    params.push(JsValue::from(&D1Type::Integer(limit as i32)));
+    params.push(JsValue::from(&D1Type::Integer(offset as i32)));
+
+    let result = db.prepare(&query).bind(&params)?.all().await?;
+    result.results::<ClipSetRecord>()
+}
+
+/// List every set regardless of whether its clips are public (admin view).
+pub async fn list_all_clip_sets(
+    ctx: &worker::RouteContext<()>,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<ClipSetRecord>> {
+    let db = ctx.d1("DB")?;
+    let query = format!(
+        "SELECT {CLIP_SET_COLUMNS} FROM clip_sets s ORDER BY s.created_at DESC LIMIT ? OFFSET ?"
+    );
+    let result = db
+        .prepare(&query)
+        .bind(&[
+            JsValue::from(&D1Type::Integer(limit as i32)),
+            JsValue::from(&D1Type::Integer(offset as i32)),
+        ])?
+        .all()
+        .await?;
+    result.results::<ClipSetRecord>()
+}
+
+/// List the public clips of one set, oldest start time first.
+pub async fn list_clips_in_set(
+    ctx: &worker::RouteContext<()>,
+    set_id: &str,
+    viewer: &str,
+) -> Result<Vec<ClipRecord>> {
+    let db = ctx.d1("DB")?;
+    let query = format!(
+        "SELECT {CLIP_COLUMNS} {CLIP_FROM} WHERE c.set_id = ? AND c.is_public = 1 \
+         ORDER BY c.start_time ASC"
+    );
+    // `liked` binds first — see CLIP_COLUMNS.
+    let result = db
+        .prepare(&query)
+        .bind(&[
+            JsValue::from(&D1Type::Text(viewer)),
+            JsValue::from(&D1Type::Text(set_id)),
+        ])?
+        .all()
+        .await?;
+    result.results::<ClipRecord>()
+}
+
+/// Delete a set and every clip in it.
+///
+/// The set is the unit that was published, so it is the unit that is withdrawn;
+/// leaving the members behind as loose public clips would mean "delete" did not
+/// remove what the author pointed at.
+pub async fn delete_clip_set(ctx: &worker::RouteContext<()>, id: &str) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    for sql in [
+        "DELETE FROM clip_likes WHERE clip_id IN (SELECT id FROM clips WHERE set_id = ?)",
+        "UPDATE clip_reports SET resolved = 1 WHERE clip_id IN (SELECT id FROM clips WHERE set_id = ?)",
+        "DELETE FROM clips WHERE set_id = ?",
+    ] {
+        let _ = db
+            .prepare(sql)
+            .bind(&[JsValue::from(&D1Type::Text(id))])?
+            .run()
+            .await;
+    }
+    let result = db
+        .prepare("DELETE FROM clip_sets WHERE id = ?")
+        .bind(&[JsValue::from(&D1Type::Text(id))])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
 /// Fetch one clip. `viewer` is the caller's identity id (empty for anonymous)
@@ -319,7 +657,7 @@ pub async fn get_clip(
     viewer: &str,
 ) -> Result<Option<ClipRecord>> {
     let db = ctx.d1("DB")?;
-    db.prepare(&format!("SELECT {CLIP_COLUMNS} FROM clips c WHERE c.id = ?"))
+    db.prepare(&format!("SELECT {CLIP_COLUMNS} {CLIP_FROM} WHERE c.id = ?"))
         .bind(&[
             JsValue::from(&D1Type::Text(viewer)),
             JsValue::from(&D1Type::Text(id)),
@@ -332,20 +670,28 @@ pub async fn get_clip(
 ///
 /// `sort` is `"likes"` (most-liked first), `"time"` (newest first, the default),
 /// or anything else (also newest first).
+///
+/// `loose_only` restricts the result to clips with no `set_id`. This has to be a
+/// server-side filter: members of a published set are public clips like any
+/// other, so a caller that wants only the ungrouped ones cannot get them by
+/// filtering a capped page — one 200-clip set would fill the whole `limit` and
+/// every loose clip would silently disappear from the list.
 pub async fn list_clips(
     ctx: &worker::RouteContext<()>,
     file_path: Option<&str>,
     viewer: &str,
     sort: &str,
+    loose_only: bool,
     offset: u32,
     limit: u32,
 ) -> Result<Vec<ClipRecord>> {
     let db = ctx.d1("DB")?;
 
-    let where_clause = if file_path.is_some() {
-        "WHERE c.is_public = 1 AND c.file_path = ? "
-    } else {
-        "WHERE c.is_public = 1 "
+    let where_clause = match (file_path.is_some(), loose_only) {
+        (true, true) => "WHERE c.is_public = 1 AND c.set_id IS NULL AND c.file_path = ? ",
+        (true, false) => "WHERE c.is_public = 1 AND c.file_path = ? ",
+        (false, true) => "WHERE c.is_public = 1 AND c.set_id IS NULL ",
+        (false, false) => "WHERE c.is_public = 1 ",
     };
 
     // Featured leads either ordering — that flag is the only thing the admin
@@ -356,7 +702,7 @@ pub async fn list_clips(
     };
 
     let query =
-        format!("SELECT {CLIP_COLUMNS} FROM clips c {where_clause}{order}LIMIT ? OFFSET ?");
+        format!("SELECT {CLIP_COLUMNS} {CLIP_FROM} {where_clause}{order}LIMIT ? OFFSET ?");
 
     // `liked` binds first — see CLIP_COLUMNS.
     let mut params: Vec<JsValue> = vec![JsValue::from(&D1Type::Text(viewer))];
@@ -377,9 +723,13 @@ pub async fn list_all_clips(
     limit: u32,
 ) -> Result<Vec<ClipRecord>> {
     let db = ctx.d1("DB")?;
-    // The admin view has no viewer identity, so `liked` is always 0 here.
+    // The admin view has no viewer identity, so `liked` is always 0 here. The
+    // file columns still come along: the admin clip list links to the file each
+    // clip points at, and a NULL `file_key` is how it spots an orphan.
     let query = "SELECT c.*, (SELECT COUNT(*) FROM clip_likes WHERE clip_id = c.id) AS like_count, \
-                 0 AS liked FROM clips c ORDER BY c.created_at DESC LIMIT ? OFFSET ?";
+                 0 AS liked, f.key AS file_key, f.content_type AS file_content_type, f.size AS file_size \
+                 FROM clips c LEFT JOIN files f ON f.path = c.file_path \
+                 ORDER BY c.created_at DESC LIMIT ? OFFSET ?";
     let result = db
         .prepare(query)
         .bind(&[
@@ -416,13 +766,14 @@ pub async fn delete_clip(ctx: &worker::RouteContext<()>, id: &str) -> Result<boo
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
-/// Move every clip and proxy that references `old_path` onto `new_path`.
+/// Move every clip, proxy and attachment that references `old_path` onto `new_path`.
 ///
-/// `clips.file_path` and `proxy_videos.file_path` join on `files.path`, which
-/// rename mutates by design (see CLAUDE.md — the key is immutable, the path is
-/// not). Without this, renaming a video silently detaches every clip and proxy
-/// it has: `/api/clips?file_path=` and `/api/proxy?file_path=` are queried with
-/// the *new* name and match nothing.
+/// `clips.file_path`, `proxy_videos.file_path`, `clip_sets.file_path` and
+/// `file_attachments.file_path` all join on `files.path`, which rename mutates
+/// by design (see CLAUDE.md — the key is immutable, the path is not). Without
+/// this, renaming a video silently detaches everything attached to it:
+/// `/api/clips?file_path=`, `/api/proxy?file_path=` and
+/// `/api/attachments?file_path=` are queried with the *new* name and match nothing.
 ///
 /// The durable fix is to key both tables on the immutable `files.key` instead;
 /// that is a schema migration, and this keeps the two names consistent until then.
@@ -435,6 +786,8 @@ pub async fn repoint_file_path(
     for sql in [
         "UPDATE clips SET file_path = ? WHERE file_path = ?",
         "UPDATE proxy_videos SET file_path = ? WHERE file_path = ?",
+        "UPDATE clip_sets SET file_path = ? WHERE file_path = ?",
+        "UPDATE file_attachments SET file_path = ? WHERE file_path = ?",
     ] {
         db.prepare(sql)
             .bind(&[
@@ -471,6 +824,12 @@ pub async fn delete_clips_for_path(
         .bind(&[JsValue::from(&D1Type::Text(file_path))])?
         .run()
         .await?;
+    // The sets that grouped them describe a file that no longer exists.
+    let _ = db
+        .prepare("DELETE FROM clip_sets WHERE file_path = ?")
+        .bind(&[JsValue::from(&D1Type::Text(file_path))])?
+        .run()
+        .await;
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) as u32)
 }
 
@@ -484,13 +843,18 @@ pub async fn rename_identity_nickname(
     nickname: &str,
 ) -> Result<()> {
     let db = ctx.d1("DB")?;
-    db.prepare("UPDATE clips SET nickname = ?, updated_at = datetime('now') WHERE identity = ?")
-        .bind(&[
-            JsValue::from(&D1Type::Text(nickname)),
-            JsValue::from(&D1Type::Text(identity)),
-        ])?
-        .run()
-        .await?;
+    for sql in [
+        "UPDATE clips SET nickname = ?, updated_at = datetime('now') WHERE identity = ?",
+        "UPDATE clip_sets SET nickname = ?, updated_at = datetime('now') WHERE identity = ?",
+    ] {
+        db.prepare(sql)
+            .bind(&[
+                JsValue::from(&D1Type::Text(nickname)),
+                JsValue::from(&D1Type::Text(identity)),
+            ])?
+            .run()
+            .await?;
+    }
     Ok(())
 }
 
@@ -678,5 +1042,12 @@ pub async fn delete_clips_by_identity(
         .bind(&[JsValue::from(&D1Type::Text(identity))])?
         .run()
         .await?;
+    // Batch-delete is the abuse hammer; leaving the offender's sets behind would
+    // leave named, attributed shells in the admin list pointing at nothing.
+    let _ = db
+        .prepare("DELETE FROM clip_sets WHERE identity = ?")
+        .bind(&[JsValue::from(&D1Type::Text(identity))])?
+        .run()
+        .await;
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) as u32)
 }

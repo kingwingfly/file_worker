@@ -38,6 +38,21 @@
     </button>
   </nav>
 
+  <!-- Clip rank. Above the gallery on purpose: the gallery is a list of source
+       files, this is a list of the moments people actually came for. Collapsed
+       to one row of controls until it has something to show. -->
+  <section class="clip-rank" id="clip-rank" hidden aria-label="切片排行">
+    <div class="clip-rank-head">
+      <h2 class="clip-rank-title">🏆 切片排行</h2>
+      <div class="rank-tabs" role="tablist">
+        <button class="rank-tab active" id="rank-tab-likes" role="tab" aria-selected="true">❤️ 最热</button>
+        <button class="rank-tab" id="rank-tab-time" role="tab" aria-selected="false">🆕 最新</button>
+      </div>
+    </div>
+    <div class="clip-rank-list" id="clip-rank-list"></div>
+    <button class="rank-more" id="rank-more" hidden>加载更多</button>
+  </section>
+
   <main id="gallery" class="gallery-grid" aria-label="切片画廊">
     <!-- Cards rendered by JavaScript -->
   </main>
@@ -73,9 +88,14 @@
     <div class="modal-card">
       <button class="modal-close" aria-label="关闭">✕</button>
       <div id="modal-media" class="modal-media"></div>
+      <div class="source-selector" id="source-selector" hidden>
+        <label for="source-select">📺 来源:</label>
+        <select id="source-select"></select>
+        <span class="source-note" id="source-note"></span>
+      </div>
       <div class="modal-info">
         <span id="modal-filename" class="modal-filename"></span>
-        <button id="modal-clip-btn" class="btn-download" style="margin-right:0.3rem;" title="切片">✂️</button>
+        <button id="modal-clip-btn" class="btn-download btn-clip" title="切片">✂️</button>
         <button id="modal-download" class="btn-download">💾</button>
       </div>
       <div id="clip-panel" class="clip-panel" hidden>
@@ -85,7 +105,7 @@
         </div>
         <div class="clip-panel-list" id="clip-panel-list"></div>
         <div class="clip-panel-footer">
-          <a id="clip-page-link" href="#" class="btn-load-more" style="display:inline-block;text-decoration:none;padding:0.4rem 1rem;font-size:0.85rem;">📝 打开切片页面</a>
+          <a id="clip-page-link" href="#" class="btn-load-more clip-page-link">📝 打开切片页面</a>
         </div>
       </div>
     </div>
@@ -96,6 +116,7 @@
     <p>💖 with 🐾</p>
   </footer>
 
+  <script defer src="mp4clip.js"></script>
   <script defer src="app.js"></script>
 </body>
 </html>

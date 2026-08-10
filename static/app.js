@@ -12,6 +12,9 @@ const state = {
   loading: false,
   previewOpen: false,
   currentPreview: null,
+  // Playback sources for the open preview: the original plus any proxies.
+  sources: [],
+  activeSource: null,
 };
 
 // ── DOM Refs ──
@@ -31,6 +34,9 @@ function init() {
   dom.modalMedia = document.getElementById('modal-media');
   dom.modalFilename = document.getElementById('modal-filename');
   dom.modalDownload = document.getElementById('modal-download');
+  dom.sourceSelector = document.getElementById('source-selector');
+  dom.sourceSelect = document.getElementById('source-select');
+  dom.sourceNote = document.getElementById('source-note');
   dom.filterBtns = document.querySelectorAll('.filter-btn');
 
   // Event listeners
@@ -51,6 +57,10 @@ function init() {
   dom.modalDownload?.addEventListener('click', () => {
     if (state.currentPreview) downloadFile(state.currentPreview);
   });
+  dom.sourceSelect?.addEventListener('change', () => {
+    const i = parseInt(dom.sourceSelect.value, 10);
+    if (state.sources && state.sources[i]) selectSource(state.sources[i]);
+  });
   dom.modalClipBtn = document.getElementById('modal-clip-btn');
   dom.clipPanel = document.getElementById('clip-panel');
   dom.clipPanelList = document.getElementById('clip-panel-list');
@@ -68,8 +78,210 @@ function init() {
     if (e.key === 'Escape' && state.previewOpen) closePreview();
   });
 
+  dom.clipRank = document.getElementById('clip-rank');
+  dom.clipRankList = document.getElementById('clip-rank-list');
+  dom.rankTabLikes = document.getElementById('rank-tab-likes');
+  dom.rankTabTime = document.getElementById('rank-tab-time');
+  dom.rankMore = document.getElementById('rank-more');
+
+  dom.rankTabLikes?.addEventListener('click', () => setRankSort('likes'));
+  dom.rankTabTime?.addEventListener('click', () => setRankSort('time'));
+  dom.rankMore?.addEventListener('click', () => loadRank(false));
+
   // Initial load
   fetchFiles();
+  loadRank(true);
+}
+
+// ── Clip rank ──
+// A leaderboard of public clips across every file, which is a different axis
+// from the gallery below it (one row per source file). `/api/clips` with no
+// `file_path` already returns exactly this, sorted by likes or recency; the
+// only thing it was missing was the file's R2 key, without which a row here
+// could be listed but neither played nor cut. That is what `file_key` on the
+// clip record is for.
+//
+// Set members are deliberately included — someone browsing a leaderboard wants
+// the best moments, not a lesson in how they were grouped. The clip page's
+// shared area is where grouping matters, and that one passes `loose=1`.
+const rank = { sort: 'likes', offset: 0, limit: 20, loading: false, items: [] };
+
+function setRankSort(sort) {
+  if (rank.sort === sort || rank.loading) return;
+  rank.sort = sort;
+  dom.rankTabLikes.classList.toggle('active', sort === 'likes');
+  dom.rankTabTime.classList.toggle('active', sort === 'time');
+  dom.rankTabLikes.setAttribute('aria-selected', String(sort === 'likes'));
+  dom.rankTabTime.setAttribute('aria-selected', String(sort === 'time'));
+  loadRank(true);
+}
+
+async function loadRank(reset) {
+  if (rank.loading) return;
+  rank.loading = true;
+  if (reset) { rank.offset = 0; rank.items = []; }
+  if (dom.rankMore) dom.rankMore.disabled = true;
+
+  try {
+    const params = new URLSearchParams({ sort: rank.sort, offset: rank.offset, limit: rank.limit });
+    const resp = await fetch('/api/clips?' + params);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    const clips = data.clips || [];
+    rank.items = rank.items.concat(clips);
+    rank.offset += rank.limit;
+    // A short page is the last one — same rule the gallery's load-more uses.
+    if (dom.rankMore) dom.rankMore.hidden = clips.length < rank.limit;
+    renderRank();
+  } catch (err) {
+    // The rank is an extra, not the point of the page: if it fails, hide it
+    // rather than push an error banner above the gallery that still works.
+    if (!rank.items.length && dom.clipRank) dom.clipRank.hidden = true;
+    console.error('clip rank:', err);
+  } finally {
+    rank.loading = false;
+    if (dom.rankMore) dom.rankMore.disabled = false;
+  }
+}
+
+function renderRank() {
+  if (!dom.clipRank) return;
+  if (!rank.items.length) { dom.clipRank.hidden = true; return; }
+  dom.clipRank.hidden = false;
+  dom.clipRankList.replaceChildren(...rank.items.map(rankRow));
+}
+
+// DOM APIs throughout: every string here (clip name, description, nickname,
+// file path) is text a stranger typed.
+function rankRow(c, i) {
+  const row = document.createElement('div');
+  row.className = 'rank-row';
+
+  const pos = document.createElement('span');
+  pos.className = 'rank-pos';
+  // Only meaningful under the likes ordering; under 最新 it is just a counter,
+  // so the medals stay off.
+  pos.textContent = rank.sort === 'likes' && i < 3 ? ['🥇', '🥈', '🥉'][i] : String(i + 1);
+  if (rank.sort === 'likes' && i < 3) pos.classList.add('medal');
+
+  const main = document.createElement('div');
+  main.className = 'rank-main';
+
+  const title = document.createElement('div');
+  title.className = 'rank-name';
+  title.textContent = c.name || '未命名片段';
+  title.title = c.name || '';
+  if (c.is_featured) {
+    const b = document.createElement('span');
+    b.className = 'rank-badge';
+    b.textContent = '精选';
+    title.appendChild(b);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'rank-meta';
+  const who = document.createElement('span');
+  who.textContent = c.nickname || '匿名';
+  const time = document.createElement('span');
+  time.className = 'rank-time';
+  time.textContent = fmtTs(c.start_time) + '–' + fmtTs(c.end_time);
+  const from = document.createElement('span');
+  from.className = 'rank-from';
+  const fileName = (c.file_path || '').split('/').pop() || c.file_path || '';
+  from.textContent = '📁 ' + fileName;
+  from.title = c.file_path || '';
+  meta.append(who, time, from);
+
+  main.append(title, meta);
+  if ((c.description || '').trim()) {
+    const d = document.createElement('div');
+    d.className = 'rank-desc';
+    d.textContent = c.description.trim();
+    d.title = c.description.trim();
+    main.appendChild(d);
+  }
+
+  const acts = document.createElement('div');
+  acts.className = 'rank-actions';
+
+  const like = document.createElement('button');
+  like.className = 'rank-like' + (c.liked ? ' liked' : '');
+  like.textContent = (c.liked ? '💖 ' : '🤍 ') + (c.like_count || 0);
+  like.title = c.liked ? '取消赞' : '赞';
+  like.addEventListener('click', () => toggleRankLike(c, like));
+  acts.appendChild(like);
+
+  // A clip whose file has been deleted still lists (its author should be able
+  // to see it), but there is nothing left to play or cut.
+  if (c.file_key) {
+    const play = document.createElement('button');
+    play.className = 'rank-btn';
+    play.textContent = '▶';
+    play.title = '播放这一段';
+    play.addEventListener('click', () => playRankClip(c));
+    const dl = document.createElement('button');
+    dl.className = 'rank-btn';
+    dl.textContent = '⬇';
+    dl.title = '导出';
+    dl.addEventListener('click', () => {
+      // showClipExport reads state.currentPreview for the file, so give it one
+      // without opening the modal.
+      state.currentPreview = rankFile(c);
+      showClipExport(c);
+    });
+    acts.append(play, dl);
+  } else {
+    const gone = document.createElement('span');
+    gone.className = 'rank-gone';
+    gone.textContent = '源文件已删除';
+    acts.appendChild(gone);
+  }
+
+  row.append(pos, main, acts);
+  return row;
+}
+
+// The clip record carries the file's columns, so the preview modal can be fed
+// without a second round trip to /api/files.
+function rankFile(c) {
+  return {
+    key: c.file_key,
+    path: c.file_path,
+    content_type: c.file_content_type || 'video/mp4',
+    size: c.file_size || 0,
+  };
+}
+
+function playRankClip(c) {
+  openPreview(rankFile(c));
+  // Seek once the element knows how long it is — setting currentTime before
+  // metadata arrives is silently dropped.
+  const media = dom.modalMedia.querySelector('video, audio');
+  if (!media) return;
+  const seek = () => { try { media.currentTime = c.start_time || 0; } catch (_) {} };
+  if (media.readyState >= 1) seek();
+  else media.addEventListener('loadedmetadata', seek, { once: true });
+  media.play().catch(() => {});
+}
+
+async function toggleRankLike(c, btn) {
+  await ensureClipIdentity();
+  if (!clipIdentity) return;
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/clips/' + encodeURIComponent(c.id) + '/like',
+      { method: c.liked ? 'DELETE' : 'POST' });
+    if (resp.ok) {
+      // Patch in place instead of refetching: under 最热 a refetch would reorder
+      // the list under the cursor, and the tap that caused it would land on a
+      // different clip than the one that was pressed.
+      c.liked = c.liked ? 0 : 1;
+      c.like_count = Math.max(0, (c.like_count || 0) + (c.liked ? 1 : -1));
+      btn.textContent = (c.liked ? '💖 ' : '🤍 ') + c.like_count;
+      btn.title = c.liked ? '取消赞' : '赞';
+      btn.classList.toggle('liked', !!c.liked);
+    }
+  } catch (_) {} finally { btn.disabled = false; }
 }
 
 // ── API ──
@@ -204,7 +416,19 @@ function openPreview(file) {
   dom.modalMedia.innerHTML = '';
 
   const ct = file.content_type || '';
-  const url = `/api/file/${encodePath(file.key)}`;
+  // The original is always source 0 and is what paints first. Proxies arrive
+  // asynchronously and only add options — this function stays synchronous so
+  // the modal never waits on a network round trip before showing anything.
+  state.sources = [{
+    key: file.key,
+    label: '📀 原片',
+    size: file.size,
+    contentType: ct,
+    isOriginal: true,
+  }];
+  state.activeSource = state.sources[0];
+  if (dom.sourceSelector) dom.sourceSelector.hidden = true;
+  if (ct.startsWith('video/') || ct.startsWith('audio/')) loadSources(file);
 
   // Show clip button for video/audio, hide for images
   if (dom.modalClipBtn) {
@@ -212,42 +436,28 @@ function openPreview(file) {
   }
   if (dom.clipPanel) dom.clipPanel.hidden = true;
 
+  renderPreviewMedia(file, state.activeSource);
+
+  dom.previewModal.hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
+// Builds the player for one source. Split out of openPreview so switching
+// sources can rebuild it — an audio-only proxy needs an <audio> element and a
+// video one needs <video>, so a kind change cannot be a plain `src` swap.
+function renderPreviewMedia(file, source) {
+  const ct = source.contentType || '';
+  const url = `/api/file/${encodePath(source.key)}`;
+  dom.modalMedia.innerHTML = '';
+
   if (ct.startsWith('image/')) {
     const img = document.createElement('img');
     img.src = url;
     img.alt = displayName(file);
     dom.modalMedia.appendChild(img);
-  } else if (ct.startsWith('video/')) {
-    const vid = document.createElement('video');
-    vid.src = url;
-    vid.controls = true;
-    vid.autoplay = true;
-    vid.playsInline = true;
-    vid.preload = 'metadata';
-    vid.style.width = '100%';
-    vid.style.maxHeight = '80vh';
-    // Videos are served as video/mp4 whatever codec is inside, so there is no
-    // way to know up front whether this browser can decode them — HEVC plays in
-    // Safari everywhere and in Chrome only where the OS supplies a hardware
-    // decoder. Let the element try, and catch the one error that means
-    // "cannot decode at all" so the user gets a download instead of a black box.
-    vid.addEventListener('error', () => {
-      if (!vid.error || vid.error.code !== vid.error.MEDIA_ERR_SRC_NOT_SUPPORTED) return;
-      // The event can land after the user moved on; don't overwrite whatever
-      // the modal is showing now.
-      if (state.currentPreview !== file) return;
-      dom.modalMedia.replaceChildren(unplayableNotice(file));
-    });
-    dom.modalMedia.appendChild(vid);
   } else if (ct.startsWith('audio/')) {
     const wrapper = document.createElement('div');
-    wrapper.style.textAlign = 'center';
-    wrapper.style.padding = '3rem 2rem';
-    wrapper.style.width = '100%';
-    wrapper.style.display = 'flex';
-    wrapper.style.flexDirection = 'column';
-    wrapper.style.alignItems = 'center';
-    wrapper.style.justifyContent = 'center';
+    wrapper.className = 'modal-audio-wrap';
 
     const visualizer = document.createElement('div');
     visualizer.className = 'audio-visualizer';
@@ -265,14 +475,102 @@ function openPreview(file) {
     audio.controls = true;
     audio.autoplay = true;
     audio.preload = 'metadata';
-    audio.style.width = '100%';
     wrapper.appendChild(audio);
 
     dom.modalMedia.appendChild(wrapper);
+  } else {
+    const vid = document.createElement('video');
+    vid.src = url;
+    vid.controls = true;
+    vid.autoplay = true;
+    vid.playsInline = true;
+    vid.preload = 'metadata';
+    // Videos are served as video/mp4 whatever codec is inside, so there is no
+    // way to know up front whether this browser can decode them — HEVC plays in
+    // Safari everywhere and in Chrome only where the OS supplies a hardware
+    // decoder. Let the element try, and catch the one error that means
+    // "cannot decode at all" so the user gets a download instead of a black box.
+    vid.addEventListener('error', () => {
+      if (!vid.error || vid.error.code !== vid.error.MEDIA_ERR_SRC_NOT_SUPPORTED) return;
+      // The event can land after the user moved on; don't overwrite whatever
+      // the modal is showing now.
+      if (state.currentPreview !== file || state.activeSource !== source) return;
+      dom.modalMedia.replaceChildren(unplayableNotice(file));
+    });
+    dom.modalMedia.appendChild(vid);
+  }
+}
+
+// ── Playback sources ──
+// Proxies are public (`/api/proxy`), so the gallery can offer them as
+// alternative sources: a 360p re-encode plays on a phone connection where the
+// original will not, and an audio-only proxy is a fraction of the bytes.
+async function loadSources(file) {
+  let proxies = [];
+  try {
+    const resp = await fetch(`/api/proxy?file_path=${encodeURIComponent(displayPath(file))}`);
+    if (resp.ok) proxies = (await resp.json()).proxies || [];
+  } catch (_) { /* the original is already playing; a failure costs nothing */ }
+
+  // The modal may have been closed or moved on while this was in flight.
+  if (!state.previewOpen || state.currentPreview !== file) return;
+  if (!proxies.length || !dom.sourceSelector) return;
+
+  for (const p of proxies) {
+    const isAudio = (p.content_type || '').startsWith('audio/');
+    state.sources.push({
+      key: p.key,
+      label: `${isAudio ? '🎵' : '🎬'} ${p.label || '代理'}`,
+      size: p.size,
+      contentType: p.content_type || '',
+      isOriginal: false,
+    });
   }
 
-  dom.previewModal.hidden = false;
-  document.body.style.overflow = 'hidden';
+  // `new Option` rather than innerHTML — labels are admin-entered text on a
+  // public page and would otherwise be parsed as markup.
+  dom.sourceSelect.replaceChildren(...state.sources.map((s, i) =>
+    new Option(`${s.label} (${formatFileSize(s.size)})`, String(i))));
+  dom.sourceSelect.value = String(state.sources.indexOf(state.activeSource));
+  dom.sourceSelector.hidden = false;
+  updateSourceNote();
+}
+
+function updateSourceNote() {
+  if (!dom.sourceNote) return;
+  const s = state.activeSource;
+  dom.sourceNote.textContent = s && !s.isOriginal ? '下载将取此来源' : '';
+}
+
+// Switches the playing source, keeping the position so changing quality
+// mid-watch does not restart from zero.
+function selectSource(source) {
+  const file = state.currentPreview;
+  if (!file) return;
+  const media = dom.modalMedia.querySelector('video, audio');
+  const wasAudio = !!state.activeSource && state.activeSource.contentType.startsWith('audio/');
+  const isAudio = (source.contentType || '').startsWith('audio/');
+  const at = media ? media.currentTime : 0;
+  const playing = media ? !media.paused : true;
+
+  state.activeSource = source;
+  updateSourceNote();
+
+  // A kind change needs a different element, and so does recovering from the
+  // unplayable notice (which replaced the player entirely).
+  if (!media || wasAudio !== isAudio) {
+    renderPreviewMedia(file, source);
+  } else {
+    media.src = `/api/file/${encodePath(source.key)}`;
+  }
+
+  const next = dom.modalMedia.querySelector('video, audio');
+  if (!next) return;
+  next.addEventListener('loadedmetadata', () => {
+    // A proxy is a re-encode of the same timeline, so the position carries over.
+    if (at && at < next.duration) next.currentTime = at;
+    if (playing) next.play().catch(() => {});
+  }, { once: true });
 }
 
 // Codecs an admin might upload, with the advice that applies when *this* device
@@ -369,10 +667,22 @@ function closePreview() {
 
 // ── Download ──
 function downloadFile(file) {
+  // Follows the source picker: choosing 360p and hitting 💾 should give you the
+  // 360p bytes, not the original. Falls back to the file itself for images and
+  // for any call made outside the preview.
+  const source = (state.currentPreview === file && state.activeSource) || null;
+  const key = source ? source.key : file.key;
   // The storage key is opaque, so the download name travels in the query string;
   // the worker turns it into Content-Disposition.
-  const name = displayName(file);
-  const url = `/api/file/${encodePath(file.key)}?download=1&name=${encodeURIComponent(name)}`;
+  let name = displayName(file);
+  if (source && !source.isOriginal) {
+    // Distinguish the file on disk from the original, which may already be
+    // sitting in the same downloads folder under the plain name.
+    const dot = name.lastIndexOf('.');
+    const tag = source.label.replace(/^\S+\s*/, '').trim() || 'proxy';
+    name = dot > 0 ? `${name.slice(0, dot)}-${tag}${name.slice(dot)}` : `${name}-${tag}`;
+  }
+  const url = `/api/file/${encodePath(key)}?download=1&name=${encodeURIComponent(name)}`;
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
@@ -490,10 +800,14 @@ function toggleClipPanel() {
 }
 
 async function loadClipPanel(file) {
-  dom.clipPanelList.innerHTML = '<div style="text-align:center;padding:1rem;color:var(--text-light);">加载中...</div>';
+  dom.clipPanelList.innerHTML = '<div class="clip-panel-status">加载中...</div>';
+  // `size` lets the clip page rank the original against the proxies when it
+  // picks a default preview source; without it the original is treated as
+  // unknown-and-largest, which is the safe assumption for a proxy anyway.
   dom.clipPageLink.href = '/clip?file=' + encodeURIComponent(displayPath(file)) +
     '&key=' + encodeURIComponent(file.key) +
-    '&type=' + ((file.content_type || '').startsWith('audio/') ? 'audio' : 'video');
+    '&type=' + ((file.content_type || '').startsWith('audio/') ? 'audio' : 'video') +
+    (file.size ? '&size=' + encodeURIComponent(file.size) : '');
 
   try {
     const resp = await fetch('/api/clips?file_path=' + encodeURIComponent(displayPath(file)) + '&sort=likes&limit=50');
@@ -501,24 +815,33 @@ async function loadClipPanel(file) {
     const data = await resp.json();
     renderClipPanel(data.clips || []);
   } catch (err) {
-    dom.clipPanelList.innerHTML = '<div style="text-align:center;padding:1rem;color:#C0392B;">加载失败: ' + err.message + '</div>';
+    const st = document.createElement('div');
+    st.className = 'clip-panel-status err';
+    st.textContent = '加载失败: ' + err.message;
+    dom.clipPanelList.replaceChildren(st);
   }
 }
 
 function renderClipPanel(clips) {
   if (!clips.length) {
-    dom.clipPanelList.innerHTML = '<div style="text-align:center;padding:1rem;color:var(--text-light);">暂无切片。去<a href="' + dom.clipPageLink.href + '" style="color:var(--pink);">切片页面</a>创建第一个！</div>';
+    const st = document.createElement('div');
+    st.className = 'clip-panel-status';
+    const a = document.createElement('a');
+    a.href = dom.clipPageLink.href;
+    a.textContent = '切片页面';
+    st.append(document.createTextNode('暂无切片。去 '), a, document.createTextNode(' 创建第一个！'));
+    dom.clipPanelList.replaceChildren(st);
     return;
   }
   dom.clipPanelList.replaceChildren(...clips.map(c => {
     const card = document.createElement('div');
-    card.style.cssText = 'padding:0.5rem 0.6rem;border-bottom:1px solid #f0f0f0;font-size:0.85rem;';
+    card.className = 'clip-panel-item';
 
     const header = document.createElement('div');
-    header.style.cssText = 'display:flex;align-items:center;gap:0.4rem;margin-bottom:0.2rem;';
+    header.className = 'clip-panel-head';
 
     const name = document.createElement('span');
-    name.style.cssText = 'font-weight:600;cursor:pointer;color:var(--pink);';
+    name.className = 'clip-panel-name';
     name.textContent = c.name || '未命名';
     name.addEventListener('click', () => {
       // Seek the video to clip start time
@@ -527,16 +850,16 @@ function renderClipPanel(clips) {
     });
 
     const time = document.createElement('span');
-    time.style.cssText = 'font-family:monospace;font-size:0.75rem;color:var(--text-light);';
+    time.className = 'clip-panel-time';
     time.textContent = fmtTs(c.start_time) + '–' + fmtTs(c.end_time);
 
     const meta = document.createElement('span');
-    meta.style.cssText = 'font-size:0.73rem;color:var(--text-light);margin-left:auto;';
+    meta.className = 'clip-panel-meta';
     meta.textContent = (c.nickname || '匿名') + ' · ❤️' + (c.like_count || 0);
 
     if (c.is_featured) {
       const feat = document.createElement('span');
-      feat.style.cssText = 'font-size:0.65rem;background:#FCF3CF;color:#B7950B;padding:0.1rem 0.3rem;border-radius:999px;font-weight:600;';
+      feat.className = 'clip-panel-badge';
       feat.textContent = '精选';
       header.appendChild(feat);
     }
@@ -544,15 +867,15 @@ function renderClipPanel(clips) {
     header.append(name, time, meta);
 
     const actions = document.createElement('div');
-    actions.style.cssText = 'display:flex;gap:0.3rem;';
+    actions.className = 'clip-panel-actions';
 
     const likeBtn = document.createElement('button');
-    likeBtn.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:999px;border:1px solid #e0e0e0;background:white;cursor:pointer;';
     likeBtn.textContent = c.liked ? '💖' : '🤍';
+    likeBtn.title = c.liked ? '取消赞' : '赞';
     likeBtn.addEventListener('click', () => clipLike(c, likeBtn));
 
     const dlBtn = document.createElement('button');
-    dlBtn.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:999px;border:1px solid #e0e0e0;background:white;cursor:pointer;';
+    dlBtn.title = '导出';
     dlBtn.textContent = '⬇';
     dlBtn.addEventListener('click', () => showClipExport(c));
 
@@ -590,32 +913,107 @@ function showClipExport(c) {
     ' -i ' + shellQuote(location.origin + '/api/file/' + encodePath(file.key)) +
     ' -t ' + dur.toFixed(1) + ' -c copy ' + shellQuote(name);
 
+  // Built with DOM APIs, not innerHTML: `c.name` is free text from a stranger's
+  // public clip, and the `<`-only escape this used to do leaves quotes and HTML
+  // entities intact. Same rule the list rows follow.
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:10001;';
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.className = 'clip-export-overlay';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay && !busy) overlay.remove(); });
 
   const dlg = document.createElement('div');
-  dlg.style.cssText = 'background:white;border-radius:12px;padding:1.25rem;max-width:520px;width:90vw;box-shadow:0 8px 30px rgba(0,0,0,0.2);';
-  dlg.innerHTML = '<h3 style="margin-bottom:0.5rem;">⬇ ' + (c.name || '切片').replace(/</g,'&lt;') + '</h3>' +
-    '<p style="font-size:0.8rem;color:#7A7A7A;margin-bottom:0.5rem;">ffmpeg 命令（下载并裁剪高质量原片）：</p>' +
-    '<pre style="background:#1a1a1a;color:#0f0;padding:0.6rem;border-radius:6px;font-size:0.75rem;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:8rem;overflow-y:auto;">' + cmd.replace(/</g,'&lt;') + '</pre>' +
-    '<p style="font-size:0.75rem;color:#7A7A7A;margin-bottom:0.75rem;">需要 <code>ffmpeg</code>。-c copy 不重新编码，最快且无损。</p>' +
-    '<div style="display:flex;gap:0.4rem;">' +
-    '<button id="cp-cmd" style="padding:0.4rem 0.8rem;border-radius:999px;border:none;background:#B5E8F7;cursor:pointer;font-size:0.8rem;">📋 复制</button>' +
-    '<button id="close-dlg" style="padding:0.4rem 0.8rem;border-radius:999px;border:none;background:#f0f0f0;cursor:pointer;font-size:0.8rem;">关闭</button>' +
-    '</div>';
+  dlg.className = 'clip-export-dialog';
+
+  const h = document.createElement('h3');
+  h.textContent = '⬇ ' + (c.name || '切片');
+  dlg.appendChild(h);
+
+  // One-click first — the ffmpeg command below it is the fallback, not the
+  // headline. The cut runs in the page against the HQ original; see mp4clip.js.
+  const quick = document.createElement('div');
+  quick.className = 'clip-export-quick';
+  const dlBtn = document.createElement('button');
+  dlBtn.className = 'clip-export-btn primary';
+  dlBtn.textContent = '⬇ 一键下载（浏览器直接剪切）';
+  dlBtn.disabled = true;
+  const note = document.createElement('p');
+  note.className = 'clip-export-note';
+  note.textContent = '正在读取索引…';
+  const bar = document.createElement('div');
+  bar.className = 'clip-export-bar';
+  bar.hidden = true;
+  const fill = document.createElement('span');
+  bar.appendChild(fill);
+  quick.append(dlBtn, note, bar);
+  dlg.appendChild(quick);
+
+  const p1 = document.createElement('p');
+  p1.className = 'clip-export-note';
+  p1.textContent = 'ffmpeg 命令（下载并裁剪高质量原片）：';
+  const pre = document.createElement('pre');
+  pre.className = 'clip-export-cmd';
+  pre.textContent = cmd;
+  const p2 = document.createElement('p');
+  p2.className = 'clip-export-note';
+  p2.textContent = '需要 ffmpeg。-c copy 不重新编码，最快且无损。';
+  dlg.append(p1, pre, p2);
+
+  const row = document.createElement('div');
+  row.className = 'clip-export-actions';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'clip-export-btn';
+  copyBtn.textContent = '📋 复制';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'clip-export-btn ghost';
+  closeBtn.textContent = '关闭';
+  row.append(copyBtn, closeBtn);
+  dlg.appendChild(row);
 
   overlay.appendChild(dlg);
   document.body.appendChild(overlay);
 
-  dlg.querySelector('#cp-cmd').addEventListener('click', () => {
+  copyBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(cmd).then(() => {
-      const b = dlg.querySelector('#cp-cmd');
-      b.textContent = '✅ 已复制!';
-      setTimeout(() => { b.textContent = '📋 复制'; }, 2000);
+      copyBtn.textContent = '✅ 已复制!';
+      setTimeout(() => { copyBtn.textContent = '📋 复制'; }, 2000);
     }).catch(() => alert('复制失败，请手动复制。'));
   });
-  dlg.querySelector('#close-dlg').addEventListener('click', () => overlay.remove());
+  closeBtn.addEventListener('click', () => { if (!busy) overlay.remove(); });
+
+  let plan = null, busy = false;
+  (async () => {
+    if (!window.MP4Clip) { note.textContent = '浏览器剪切不可用，请使用上面的 ffmpeg 命令。'; return; }
+    const src = await MP4Clip.open('/api/file/' + encodePath(file.key));
+    if (!src.ok) { note.textContent = src.reason + '，请使用下面的 ffmpeg 命令。'; return; }
+    const p = MP4Clip.plan(src, start, c.end_time || 0);
+    if (!p.ok) { note.textContent = p.reason + '，请使用下面的 ffmpeg 命令。'; return; }
+    plan = p;
+    dlBtn.disabled = false;
+    note.textContent = '约 ' + formatFileSize(p.bytes) + '，无需重新编码'
+      + (p.snapped ? ' · 起点对齐到关键帧 ' + fmtTs(p.actualStart) : '');
+  })();
+
+  dlBtn.addEventListener('click', async () => {
+    if (!plan || busy) return;
+    busy = true; dlBtn.disabled = true; bar.hidden = false;
+    const label = dlBtn.textContent;
+    dlBtn.textContent = '正在剪切…';
+    const total = plan.fetchBytes + plan.bytes;
+    try {
+      const blob = await MP4Clip.render(plan, {
+        onProgress: ev => {
+          const done = ev.phase === 'fetch' ? ev.loaded : plan.fetchBytes + ev.loaded;
+          fill.style.width = Math.round((done / total) * 100) + '%';
+        }
+      });
+      MP4Clip.saveBlob(blob, MP4Clip.safeName(c.name || '切片', plan.ext));
+      note.textContent = '✅ 已保存（' + formatFileSize(blob.size) + '）';
+    } catch (err) {
+      note.textContent = '剪切失败：' + (err && err.message || err) + '，请使用下面的 ffmpeg 命令。';
+    } finally {
+      busy = false; bar.hidden = true; fill.style.width = '0%';
+      dlBtn.textContent = label; dlBtn.disabled = false;
+    }
+  });
 }
 
 function fmtTs(s) {

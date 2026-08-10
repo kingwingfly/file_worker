@@ -1,0 +1,534 @@
+/* width:100% is load-bearing. `body` is a column flex container, and an
+   auto cross-axis margin turns off `stretch`, so this box falls back to
+   fit-content — which is floored by its widest child's *min-content*. The
+   nav below never wraps, so without an explicit width the whole page grew
+   to the nav's full length and every section overflowed a phone sideways.
+   It only ever looked fine because nothing here used to have a min-content
+   wider than the viewport. */
+.admin-container {
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 1.25rem 1.5rem 2.5rem;
+}
+
+.admin-section {
+  background: var(--white);
+  border-radius: var(--radius);
+  padding: 1.35rem 1.4rem;
+  margin-bottom: 1.15rem;
+  box-shadow: var(--shadow);
+  /* The nav below is sticky, so an anchor jump would otherwise land the
+     heading underneath it. */
+  scroll-margin-top: 4.25rem;
+}
+
+.admin-section h2 {
+  font-size: 1.08rem;
+  margin-bottom: 0.9rem;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-left: 0.6rem;
+  border-left: 4px solid var(--pink);
+  line-height: 1.35;
+}
+
+/* Seven stacked sections is a long scroll on a phone and a long scroll on a
+   monitor too — anchors are cheaper than collapsing everything. */
+.admin-nav {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 0.6rem 0.15rem;
+  margin-bottom: 1rem;
+  background: var(--bg);
+  box-shadow: 0 6px 12px -8px rgba(0,0,0,0.25);
+}
+.admin-nav::-webkit-scrollbar { display: none; }
+.admin-nav a {
+  flex: 0 0 auto;
+  text-decoration: none;
+  color: var(--text);
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: var(--transition);
+}
+.admin-nav a:hover { background: var(--light-pink); border-color: var(--pink); }
+
+.upload-zone {
+  border: 3px dashed var(--soft-blue);
+  border-radius: var(--radius);
+  padding: 2rem;
+  text-align: center;
+  transition: var(--transition);
+  cursor: pointer;
+  position: relative;
+}
+
+.upload-zone:hover,
+.upload-zone.drag-over {
+  border-color: var(--pink);
+  background: var(--light-pink);
+}
+
+.upload-zone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.upload-zone-icon { font-size: 3rem; margin-bottom: 0.5rem; }
+.upload-zone-text { font-weight: 500; }
+.upload-zone-hint { color: var(--text-light); font-size: 0.85rem; margin-top: 0.25rem; }
+
+.form-group {
+  margin-top: 1rem;
+}
+
+.form-group label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  transition: var(--transition);
+}
+
+.form-group input:focus {
+  border-color: var(--pink);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 182, 193, 0.2);
+}
+
+.form-hint { color: var(--text-light); font-size: 0.8rem; margin-top: 0.2rem; }
+
+.form-group select {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  background: var(--white);
+  transition: var(--transition);
+}
+.form-group select:focus {
+  border-color: var(--pink);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 182, 193, 0.2);
+}
+
+.upload-mode { display: flex; gap: 1rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+.upload-mode label {
+  display: flex; align-items: center; gap: 0.35rem;
+  font-size: 0.9rem; font-weight: 500; cursor: pointer;
+  padding: 0.35rem 0.75rem; border-radius: 999px;
+  border: 2px solid var(--soft-blue); transition: var(--transition);
+}
+.upload-mode label:has(input:checked) { border-color: var(--pink); background: rgba(255, 182, 193, 0.12); }
+
+.btn-upload {
+  display: block;
+  width: 100%;
+  margin-top: 1rem;
+  background: var(--pink);
+  color: var(--white);
+  border: none;
+  padding: 0.75rem;
+  border-radius: 999px;
+  font-size: 1.05rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.btn-upload:hover { background: #FF9AAF; transform: scale(1.02); }
+.btn-upload:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+#progress-wrapper {
+  margin-top: 1rem;
+}
+
+.upload-progress {
+  height: 6px;
+  background: var(--soft-blue);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.upload-progress-bar {
+  height: 100%;
+  background: var(--pink);
+  border-radius: 3px;
+  transition: width 0.15s;
+  width: 0%;
+}
+
+.upload-progress-text {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text-light);
+  margin-top: 0.35rem;
+}
+
+.upload-wake-hint {
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--text-light);
+  margin-top: 0.2rem;
+}
+
+.upload-result {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+}
+
+.upload-result.success {
+  background: #D5F5E3;
+  color: #1E8449;
+}
+
+.upload-result.error {
+  background: #FADBD8;
+  color: #C0392B;
+}
+
+.file-list {
+  list-style: none;
+}
+
+.file-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #f0f0f0;
+  gap: 0.75rem;
+}
+
+.file-list-item:last-child { border-bottom: none; }
+
+.file-list-name {
+  flex: 1;
+  font-size: 0.9rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-list-size {
+  font-size: 0.8rem;
+  color: var(--text-light);
+  white-space: nowrap;
+  min-width: 5.5rem;
+  text-align: right;
+}
+
+.file-list-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+
+.file-list-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+/* Placeholder / error rows are a single centred line, not a name-and-meta
+   pair, so they opt out of the row layout. */
+.file-list-item.admin-empty,
+.file-list-item.admin-error {
+  justify-content: center;
+  text-align: center;
+  display: block;
+  padding: 1rem 0;
+}
+
+.btn-file-action {
+  background: none;
+  border: 1px solid #e0e0e0;
+  color: var(--text-light);
+  padding: 0.25rem 0.6rem;
+  min-width: 3.8rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+/* The default hover used to be red, so 🔄 加载切片, 📋 复制作者标识 and
+   📹 代理 all previewed themselves as destructive. Red now lives on
+   .danger, which every delete button carries. */
+.btn-file-action:hover { background: var(--muted-bg); color: var(--text); border-color: var(--soft-blue); }
+
+.btn-rename:hover { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-border); }
+
+.rename-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.rename-dialog {
+  background: var(--white);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  min-width: 320px;
+  max-width: 90vw;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.18);
+}
+
+.rename-dialog h3 {
+  margin-bottom: 0.75rem;
+  font-size: 1.1rem;
+}
+
+.rename-dialog input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+}
+
+.rename-dialog input:focus {
+  border-color: var(--pink);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 182, 193, 0.2);
+}
+
+.rename-dialog .rename-hint {
+  font-size: 0.8rem;
+  color: var(--text-light);
+  margin-top: 0.35rem;
+}
+
+.rename-dialog .rename-oldpath {
+  font-size: 0.85rem;
+  color: var(--text-light);
+  margin-bottom: 0.5rem;
+  word-break: break-all;
+}
+
+.rename-dialog .rename-label {
+  display: block;
+  font-weight: 500;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+}
+
+.rename-dialog-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  justify-content: flex-end;
+}
+
+.rename-dialog-actions button {
+  padding: 0.5rem 1.2rem;
+  border-radius: 999px;
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.btn-rename-confirm {
+  background: var(--pink);
+  color: var(--white);
+}
+
+.btn-rename-confirm:hover { background: #FF9AAF; }
+.btn-rename-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-rename-cancel {
+  background: #f0f0f0;
+  color: var(--text);
+}
+
+.btn-rename-cancel:hover { background: #e0e0e0; }
+
+/* Visibility is driven by the `hidden` attribute, which is how every
+   caller toggles this. It used to be `display: none` here plus a `.show`
+   class that nothing ever added — a class selector outranks the UA's
+   `[hidden]` rule, so the box could never appear at all. */
+.duplicate-warning {
+  background: #FCF3CF;
+  border: 1px solid #F9E79F;
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 1rem;
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.duplicate-warning[hidden] { display: none; }
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.admin-header .back-link {
+  color: var(--pink);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.admin-header .back-link:hover { text-decoration: underline; }
+
+/* ── Generated rows ──
+   The proxy / clip / clip-set / report lists used to be built with
+   `style.cssText` on every element, which put five near-identical copies of
+   the same row layout in the script and left nothing for a media query to
+   target. One class each, so they can be restyled and made responsive in
+   one place. */
+.admin-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.admin-row:last-child { border-bottom: none; }
+
+.admin-row-info {
+  flex: 1 1 12rem;
+  min-width: 0;
+  font-size: 0.83rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.admin-row-info b { font-weight: 600; }
+.admin-row-name {
+  flex: 1 1 8rem;
+  min-width: 0;
+  font-size: 0.86rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-row-sub { font-size: 0.78rem; color: var(--text-light); }
+.admin-row-actions {
+  display: flex;
+  gap: 0.3rem;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+/* Proxy detail panel, opened under a file row. */
+.admin-subpanel { padding: 0.3rem 0 0.15rem 1rem; }
+.admin-subrow {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  font-size: 0.8rem;
+}
+.admin-subrow .admin-row-name { font-size: 0.8rem; }
+
+.admin-empty { font-size: 0.82rem; color: var(--text-light); }
+.admin-error { font-size: 0.85rem; color: var(--danger); }
+.admin-note { font-size: 0.85rem; color: var(--text-light); margin-bottom: 0.75rem; }
+.admin-toolbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.85rem; }
+.admin-count { font-size: 0.8rem; color: var(--text-light); }
+.admin-inline-form { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.admin-inline-form input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  padding: 0.45rem 0.7rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+  color: var(--text);
+}
+.admin-inline-form input:focus { border-color: var(--pink); outline: none; }
+.admin-result { margin-top: 0.6rem; font-size: 0.85rem; }
+.admin-result.ok { color: var(--ok); }
+.admin-result.err { color: var(--danger); }
+
+/* Replaces `btn.style.color = '#C0392B'`, repeated seven times, which gave a
+   red label but left the hover state saying "rename". */
+.btn-file-action.danger { color: var(--danger); border-color: var(--danger-border); }
+.btn-file-action.danger:hover { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-border); }
+.btn-file-action:active { transform: scale(0.97); }
+
+.dialog-actions-inline { margin-top: 0.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.dialog-actions-inline button { font-size: 0.85rem; padding: 0.4rem 1rem; }
+
+/* Centred flex child with no max-height puts the buttons off-screen on a
+   phone in landscape. Scroll the overlay, and cap the dialog in dvh —
+   iOS Safari's vh is the *large* viewport, so 90vh still overflows. */
+.rename-dialog-overlay {
+  align-items: flex-start;
+  justify-content: center;
+  padding: 1.5rem 0.75rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.rename-dialog {
+  margin: auto;
+  width: 100%;
+  max-width: 420px;
+  max-height: calc(100dvh - 3rem);
+  overflow-y: auto;
+}
+
+@media (max-width: 640px) {
+  .admin-container { padding: 0.75rem 0.75rem 2rem; }
+  .admin-section { padding: 0.95rem 0.9rem; border-radius: var(--radius-sm); margin-bottom: 0.85rem; }
+  .admin-section h2 { font-size: 1rem; }
+  .admin-header { flex-wrap: wrap; gap: 0.5rem; }
+  .upload-zone { padding: 1.25rem 1rem; }
+  .upload-zone-icon { font-size: 2.25rem; }
+  /* At 360px the name had ~60px left over: 5.5rem of size plus three
+     3.8rem-minimum buttons all claimed their width first. */
+  .file-list-item { flex-direction: column; align-items: stretch; gap: 0.4rem; padding: 0.6rem 0; }
+  .file-list-name { white-space: normal; word-break: break-word; }
+  .file-list-meta { justify-content: space-between; gap: 0.5rem; }
+  .file-list-size { text-align: left; min-width: 0; }
+  .file-list-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .admin-row-actions { flex-basis: 100%; margin-left: 0; justify-content: flex-end; }
+  .rename-dialog { min-width: 0; }
+  .rename-dialog-actions button { flex: 1 1 auto; }
+}
+
+@media (pointer: coarse) {
+  .btn-file-action { min-height: 38px; }
+  .btn-upload { min-height: 46px; }
+  .admin-nav a, .rename-dialog-actions button, .upload-mode label { min-height: 38px; display: flex; align-items: center; }
+  .admin-nav a { align-items: center; }
+}

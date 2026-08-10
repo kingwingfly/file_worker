@@ -158,6 +158,40 @@ fn sanitize_content_type(raw: &str) -> String {
     }
 }
 
+/// Clamp an attachment's Content-Type to a set of inert document types.
+///
+/// Attachments are subtitles, transcripts and notes, so the media allowlist
+/// above would flatten every one of them to `application/octet-stream` and the
+/// clip page would have nothing to describe them with. This keeps a *label*
+/// worth storing while refusing anything the browser would execute.
+///
+/// It is metadata only. `/api/file/*key` re-runs `sanitize_content_type` on
+/// every serve, so an attachment goes over the wire as
+/// `application/octet-stream` whatever this returns — which is exactly what a
+/// download wants. Do not "fix" the serve path to honour this instead: it is
+/// the same origin as `/admin`, and an active type there is stored XSS.
+fn sanitize_attachment_content_type(raw: &str) -> String {
+    let base = raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+
+    const INERT: &[&str] = &[
+        "text/plain",
+        "text/vtt",
+        "text/markdown",
+        "text/csv",
+        "text/tab-separated-values",
+        "application/json",
+        "application/x-subrip",
+        "application/pdf",
+        "application/zip",
+    ];
+
+    if INERT.contains(&base.as_str()) {
+        base
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
 /// Reject cross-site state-changing calls to the admin API.
 ///
 /// Admin routes authenticate on the `CF_Authorization` cookie alone, and
@@ -383,6 +417,57 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             }))?
             .with_headers(cors::headers()?))
         })
+        // GET /api/attachments?file_path=... — list a file's related files (public)
+        //
+        // Public for the same reason /api/proxy is: the clip page is public, and
+        // an attachment exists in order to be handed to viewers. The bytes are
+        // fetched from /api/file/{key}, which was already public.
+        .get_async("/api/attachments", |req, ctx| async move {
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let file_path = qs.get("file_path").map(|s| s.as_str()).unwrap_or("");
+
+            if file_path.is_empty() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "attachments": [],
+                }))?
+                .with_headers(cors::headers()?));
+            }
+
+            let attachments = db::list_attachments(&ctx, file_path).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "attachments": attachments,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // GET /api/skill — the clip-writing skill, for feeding to an LLM
+        //
+        // Served from the repo's own `SKILL.md` via `include_str!` rather than
+        // copied into `static/`: one copy in git, so the skill the clip page
+        // hands out cannot drift from the one the README points at. It is a few
+        // KB of text in the WASM binary.
+        //
+        // `?download=1` attaches it; the bare URL stays inline so the page's
+        // 复制 button can fetch it. Cache-Control is short, not immutable —
+        // unlike an R2 key this content *does* change, with every deploy.
+        .get_async("/api/skill", |req, _ctx| async move {
+            const SKILL_MD: &str = include_str!("../SKILL.md");
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+
+            let mut headers = Headers::new();
+            headers.set("Content-Type", "text/markdown; charset=utf-8")?;
+            headers.set("Cache-Control", "public, max-age=300")?;
+            headers.set("X-Content-Type-Options", "nosniff")?;
+            if qs.get("download").map(|v| v == "1").unwrap_or(false) {
+                headers.set("Content-Disposition", &content_disposition("SKILL.md"))?;
+            }
+            cors::extend_headers(&mut headers)?;
+
+            Ok(Response::ok(SKILL_MD)?.with_headers(headers))
+        })
         // POST /api/identity — issue (or re-nickname) a signed identity cookie
         .post_async("/api/identity", |mut req, ctx| async move {
             // Read the existing cookie *first*. Minting a fresh id for a caller
@@ -460,11 +545,15 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             let sort = qs.get("sort").map(|s| s.as_str()).unwrap_or("time");
             let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
             let limit: u32 = qs.get("limit").and_then(|v| v.parse().ok()).unwrap_or(50).min(100);
+            // `?loose=1` drops clips that belong to a set. The clip page's shared
+            // area lists sets separately and needs the remainder; the gallery
+            // player omits it and gets one flat jump list of everything public.
+            let loose_only = qs.get("loose").map(|v| v == "1" || v == "true").unwrap_or(false);
 
             // Anonymous callers get `liked: 0` for every row rather than a 401 —
             // the list itself is public.
             let viewer = current_identity(&req, &ctx).await?.map(|p| p.id).unwrap_or_default();
-            let clips = db::list_clips(&ctx, file_path, &viewer, sort, offset, limit).await?;
+            let clips = db::list_clips(&ctx, file_path, &viewer, sort, loose_only, offset, limit).await?;
 
             Ok(Response::from_json(&serde_json::json!({
                 "clips": clips,
@@ -507,7 +596,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
 
             db::insert_clip(
                 &ctx, &id, &file_path, &who.id, &who.nickname,
-                &name, &description, start_time, end_time, is_public,
+                &name, &description, start_time, end_time, is_public, None,
             ).await?;
 
             let clip = db::get_clip(&ctx, &id, &who.id).await?;
@@ -516,6 +605,135 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 "clip": clip,
             }))?
             .with_headers(cors::headers()?))
+        })
+        // GET /api/clip-sets — list public clip sets with their member clips
+        //
+        // Each set is returned with its clips inlined. The alternative — a list
+        // call plus one fetch per expanded set — turns browsing a file with a
+        // dozen collections into a dozen round trips on a page that already
+        // fetches the loose-clip list.
+        .get_async("/api/clip-sets", |req, ctx| async move {
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let file_path = qs.get("file_path").map(|s| s.as_str());
+            let sort = qs.get("sort").map(|s| s.as_str()).unwrap_or("time");
+            let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u32 = qs.get("limit").and_then(|v| v.parse().ok()).unwrap_or(30).min(50);
+
+            let viewer = current_identity(&req, &ctx).await?.map(|p| p.id).unwrap_or_default();
+            let sets = db::list_clip_sets(&ctx, file_path, sort, offset, limit).await?;
+
+            let mut out = Vec::with_capacity(sets.len());
+            for set in sets {
+                let clips = db::list_clips_in_set(&ctx, &set.id, &viewer).await?;
+                out.push(serde_json::json!({ "set": set, "clips": clips }));
+            }
+
+            Ok(Response::from_json(&serde_json::json!({
+                "sets": out,
+                "offset": offset,
+                "limit": limit,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /api/clip-sets — publish a whole archive set in one call
+        .post_async("/api/clip-sets", |mut req, ctx| async move {
+            let who = match current_identity(&req, &ctx).await? {
+                Some(w) => w,
+                None => return identity_required(),
+            };
+
+            let body: serde_json::Value = req.json().await?;
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let name = clamp_text(body["name"].as_str().unwrap_or(""), 100);
+            let description = clamp_text(body["description"].as_str().unwrap_or(""), 500);
+            let empty = Vec::new();
+            let clips = body["clips"].as_array().unwrap_or(&empty);
+
+            if file_path.is_empty() || name.is_empty() || clips.is_empty() {
+                return Ok(Response::error(
+                    "Bad Request: file_path, name and at least one clip are required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+            // Bounded so one request cannot insert an unbounded number of rows;
+            // the client caps the archive UI well below this.
+            if clips.len() > 200 {
+                return Ok(Response::error("Bad Request: too many clips in one set (max 200)", 400)?
+                    .with_headers(cors::headers()?));
+            }
+            if !db::path_exists(&ctx, &file_path).await? {
+                return json_not_found("文件不存在。");
+            }
+
+            // Validate every clip before writing anything. R2 and D1 are not
+            // transactional here either, so a set that fails halfway would leave
+            // a partial collection under a name the author already sees.
+            let mut parsed = Vec::with_capacity(clips.len());
+            for c in clips {
+                let start_time = c["start_time"].as_f64().unwrap_or(0.0);
+                let end_time = c["end_time"].as_f64().unwrap_or(0.0);
+                if start_time < 0.0 || start_time >= end_time {
+                    return Ok(Response::error(
+                        "Bad Request: every clip needs valid start/end times", 400)?
+                        .with_headers(cors::headers()?));
+                }
+                parsed.push((
+                    clamp_text(c["name"].as_str().unwrap_or(""), 100),
+                    clamp_text(c["description"].as_str().unwrap_or(""), 500),
+                    start_time,
+                    end_time,
+                ));
+            }
+
+            let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+            let ts = Date::now().as_millis();
+            let set_id = format!("set_{:08x}{:08x}", rand, ts as u32);
+
+            db::insert_clip_set(
+                &ctx, &set_id, &file_path, &who.id, &who.nickname, &name, &description,
+            ).await?;
+
+            for (i, (cname, cdesc, start_time, end_time)) in parsed.iter().enumerate() {
+                let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+                let id = format!("clip_{:08x}{:08x}{:04x}", rand, ts as u32, i as u16);
+                // A member of a published set is public: `is_public` remains the
+                // only visibility flag, `set_id` is grouping alone.
+                if let Err(e) = db::insert_clip(
+                    &ctx, &id, &file_path, &who.id, &who.nickname,
+                    cname, cdesc, *start_time, *end_time, true, Some(&set_id),
+                ).await {
+                    // Roll the set back rather than leaving a half-published
+                    // collection the author cannot tell is incomplete.
+                    let _ = db::delete_clip_set(&ctx, &set_id).await;
+                    return Err(e);
+                }
+            }
+
+            let set = db::get_clip_set(&ctx, &set_id).await?;
+            Ok(Response::from_json(&serde_json::json!({"ok": true, "set": set}))?
+                .with_headers(cors::headers()?))
+        })
+        // DELETE /api/clip-sets/{id} — withdraw your own set (and its clips)
+        .delete_async("/api/clip-sets/:id", |req, ctx| async move {
+            let who = match current_identity(&req, &ctx).await? {
+                Some(w) => w,
+                None => return identity_required(),
+            };
+            let id = ctx.param("id").map_or("", |v| v);
+
+            let set = match db::get_clip_set(&ctx, id).await? {
+                Some(s) => s,
+                None => return json_not_found("归档不存在。"),
+            };
+            if set.identity != who.id {
+                return Ok(Response::error("Forbidden: not your clip set", 403)?
+                    .with_headers(cors::headers()?));
+            }
+
+            db::delete_clip_set(&ctx, id).await?;
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
         })
         // DELETE /api/clips/{id} — delete own clip (identity must match)
         .delete_async("/api/clips/:id", |req, ctx| async move {
@@ -897,6 +1115,14 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 let _ = bucket.delete(&proxy_key).await;
             }
             db::delete_proxies_for_path(&ctx, &path).await?;
+
+            // Attachments are separate R2 objects for the same reason and with
+            // the same consequence — nothing enumerates them once the row is gone.
+            for attachment_key in db::list_attachment_keys(&ctx, &path).await? {
+                let _ = bucket.delete(&attachment_key).await;
+            }
+            db::delete_attachments_for_path(&ctx, &path).await?;
+
             let clips_deleted = db::delete_clips_for_path(&ctx, &path).await?;
 
             db::delete_by_path(&ctx, &path).await?;
@@ -1155,6 +1381,189 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             Ok(Response::from_json(&serde_json::json!({"ok": true}))?
                 .with_headers(cors::headers()?))
         })
+        // === Admin Attachment API ===
+        //
+        // A near-copy of the proxy routes above, on purpose: the admin page runs
+        // both through the same uploader, so both need the same /start and
+        // /complete shape. What differs is the key prefix, the content-type
+        // allowlist, and that `filename` is persisted (a proxy is played, an
+        // attachment is downloaded and needs a display name).
+        //
+        // POST /admin/api/attachment/start — begin an attachment multipart upload
+        .post_async("/admin/api/attachment/start", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Attachment upload start by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let filename = body["filename"].as_str().unwrap_or("attachment.txt");
+            let content_type =
+                sanitize_attachment_content_type(body["content_type"].as_str().unwrap_or_default());
+
+            if file_path.is_empty() {
+                return Ok(Response::error("Bad Request: file_path is required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            // An attachment bound to a path that names no file is unreachable:
+            // /api/attachments is queried by display path, and nothing would
+            // ever list it again.
+            if !db::path_exists(&ctx, &file_path).await? {
+                return json_not_found("文件不存在。");
+            }
+
+            let ts = Date::now().as_millis();
+            let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+            let key = format!(
+                "attachments/{}/{}-{:08x}/{}",
+                ts / 86_400_000,
+                ts,
+                rand,
+                filename
+            );
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let metadata = HttpMetadata {
+                content_type: Some(content_type.clone()),
+                ..Default::default()
+            };
+            let upload = bucket
+                .create_multipart_upload(&key)
+                .http_metadata(metadata)
+                .execute()
+                .await?;
+            let upload_id = upload.upload_id().await;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "upload_id": upload_id,
+                "key": key,
+                "file_path": file_path,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/attachment/complete — finish upload + insert DB record
+        .post_async("/admin/api/attachment/complete", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Attachment complete by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let upload_id = body["upload_id"].as_str().unwrap_or("").to_string();
+            let key = body["key"].as_str().unwrap_or("").to_string();
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let label = clamp_text(body["label"].as_str().unwrap_or(""), 48);
+            // Bounded like every other free-text field, and it ends up in a
+            // Content-Disposition header, which `content_disposition()` escapes.
+            let filename = clamp_text(body["filename"].as_str().unwrap_or(""), 120);
+            let content_type =
+                sanitize_attachment_content_type(body["content_type"].as_str().unwrap_or_default());
+            let parts_json = body["parts"]
+                .as_array()
+                .ok_or_else(|| worker::Error::RustError("missing parts array".into()))?;
+
+            if upload_id.is_empty() || key.is_empty() || file_path.is_empty() {
+                return Ok(Response::error(
+                    "Bad Request: missing upload_id, key, or file_path",
+                    400,
+                )?
+                .with_headers(cors::headers()?));
+            }
+
+            let uploaded_parts: Vec<UploadedPart> = parts_json
+                .iter()
+                .map(|p| {
+                    UploadedPart::new(
+                        p["n"].as_u64().unwrap_or(0) as u16,
+                        p["etag"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+            let obj = upload.complete(uploaded_parts).await?;
+            let size = obj.size() as i64;
+
+            // Falling back to the key's last segment matters: without a name the
+            // download would be served under an opaque storage key.
+            let filename = if filename.trim().is_empty() {
+                key.rsplit('/').next().unwrap_or("attachment").to_string()
+            } else {
+                filename
+            };
+
+            match db::insert_attachment(&ctx, &file_path, &key, &label, &filename, &content_type, size)
+                .await
+            {
+                Ok(()) => {
+                    console_log!(
+                        "Attachment complete: file_path={}, key={}, size={}",
+                        file_path,
+                        key,
+                        size
+                    );
+                    Ok(Response::from_json(&serde_json::json!({
+                        "ok": true,
+                        "key": key,
+                        "file_path": file_path,
+                        "filename": filename,
+                        "size": size,
+                    }))?
+                    .with_headers(cors::headers()?))
+                }
+                Err(e) => {
+                    console_log!("Attachment D1 insert failed, cleaning up R2 object: {:?}", e);
+                    let _ = bucket.delete(&key).await;
+                    Err(e)
+                }
+            }
+        })
+        // GET /admin/api/attachment?file_path=... — list attachments for a file
+        .get_async("/admin/api/attachment", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let file_path = qs.get("file_path").map(|s| s.as_str()).unwrap_or("");
+
+            if file_path.is_empty() {
+                return Ok(Response::error("Bad Request: file_path query param required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let attachments = db::list_attachments(&ctx, file_path).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "attachments": attachments,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/attachment?key=... — delete an attachment by R2 key
+        .delete_async("/admin/api/attachment", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Attachment delete by: {:?}", claims.email);
+
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let key = qs.get("key").map(|s| s.as_str()).unwrap_or("");
+
+            if key.is_empty() {
+                return Ok(Response::error("Bad Request: key query param required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            // Same guard as the proxy route: only ever delete an object this
+            // table owns, or `?key=uploads/…` would delete a source file's bytes.
+            if !db::attachment_exists(&ctx, key).await? {
+                return json_not_found("关联文件不存在。");
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            bucket.delete(key).await?;
+            db::delete_attachment_by_key(&ctx, key).await?;
+
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
+        })
         // === Admin Clip Management API ===
         // GET /admin/api/clips — list all clips
         .get_async("/admin/api/clips", |req, ctx| async move {
@@ -1172,6 +1581,42 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 "limit": limit,
             }))?
             .with_headers(cors::headers()?))
+        })
+        // GET /admin/api/clip-sets — list every set, public members or not
+        .get_async("/admin/api/clip-sets", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u32 = qs.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100).min(500);
+
+            let sets = db::list_all_clip_sets(&ctx, offset, limit).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "sets": sets,
+                "offset": offset,
+                "limit": limit,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/clip-sets/{id} — delete any set and its clips
+        .delete_async("/admin/api/clip-sets/:id", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Admin clip-set delete by: {:?}", claims.email);
+
+            let id = ctx.param("id").map_or("", |v| v);
+            if id.is_empty() {
+                return Ok(Response::error("Bad Request: missing clip set id", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            if !db::delete_clip_set(&ctx, id).await? {
+                return json_not_found("归档不存在。");
+            }
+
+            console_log!("Admin deleted clip set: {}", id);
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
         })
         // DELETE /admin/api/clips/{id} — delete any clip (admin force-delete)
         .delete_async("/admin/api/clips/:id", |req, ctx| async move {
