@@ -573,87 +573,23 @@ function selectSource(source) {
   }, { once: true });
 }
 
-// Codecs an admin might upload, with the advice that applies when *this* device
-// turns out to lack a decoder for one. The HEVC and AV1 cases are near-inverses:
-// Chrome and Firefox ship a software AV1 decoder so AV1 plays there on any
-// platform, while HEVC needs an OS-provided hardware decoder and is Safari's
-// strong suit. Sample codec strings are the standard probe values.
-const VIDEO_CODECS = [
-  {
-    name: 'H.264',
-    type: 'video/mp4; codecs="avc1.42E01E"',
-    advice: '若此文件为 H.264：几乎所有浏览器都支持，播放失败通常说明文件本身有问题。',
-  },
-  {
-    name: 'HEVC (H.265)',
-    type: 'video/mp4; codecs="hvc1.1.6.L93.B0"',
-    advice: '若此文件为 HEVC：请改用 Safari。Chrome 没有软件解码器，只能在 macOS、'
-      + 'Android，以及装了「HEVC 视频扩展」的 Windows 上播放；Linux 版 Chrome 和 '
-      + 'Firefox 无法播放。',
-  },
-  {
-    name: 'AV1',
-    type: 'video/mp4; codecs="av01.0.05M.08"',
-    advice: '若此文件为 AV1：请改用 Chrome 或 Firefox，两者都内置软件解码器，任何平台都可播放。'
-      + 'Safari 需要 17 及以上版本，并且要 M3 代及以后的 Apple 芯片。',
-  },
-  {
-    name: 'VP9',
-    type: 'video/mp4; codecs="vp09.00.10.08"',
-    advice: '若此文件为 VP9：请改用 Chrome 或 Firefox。',
-  },
-];
-
-// What this device can decode. Only ever called after a real playback failure —
-// as a pre-flight gate it would be wrong, because it reports what the browser
-// supports and says nothing about which codec is inside this particular file.
-function probeVideoCodecs() {
-  const probe = document.createElement('video');
-  return VIDEO_CODECS.map(codec => ({
-    ...codec,
-    // '' means no; 'maybe' and 'probably' both mean it will try.
-    supported: probe.canPlayType(codec.type) !== '',
-  }));
-}
-
 // Replacement for a <video> the browser refused to decode. The file is served as
 // video/mp4 whatever is inside it, so instead of guessing the codec we show what
 // this device can decode and let the mismatch speak for itself.
+//
+// The codec table and the probe live in `codecs.js`, shared with the clip page —
+// both pages have a player that can be handed an undecodable file, and the
+// answer has to be the same on both.
 function unplayableNotice(file) {
   const box = document.createElement('div');
   box.className = 'media-unplayable';
-
-  const title = document.createElement('h3');
-  title.textContent = '⚠️ 此浏览器无法播放该视频';
-
-  const results = probeVideoCodecs();
-  const unsupported = results.filter(c => !c.supported);
-
-  const intro = document.createElement('p');
-  intro.textContent = '当前设备的视频解码能力：';
-
-  const list = document.createElement('div');
-  list.className = 'codec-support';
-  for (const codec of results) {
-    const item = document.createElement('span');
-    item.className = codec.supported ? 'ok' : 'no';
-    item.textContent = `${codec.supported ? '✅' : '❌'} ${codec.name}`;
-    list.appendChild(item);
-  }
-
-  const advice = document.createElement('p');
-  advice.textContent = unsupported.length
-    ? unsupported.map(c => c.advice).join(' ')
-    // Every codec probes as playable, so the container is the likelier culprit —
-    // .mkv passes the server's video/* check but no browser plays it.
-    : '此设备支持上述所有编码，问题可能出在容器格式（例如 .mkv）或文件本身。'
-      + '请下载后用本地播放器打开。';
+  box.append(...VideoCodecs.buildPanel());
 
   const btn = document.createElement('button');
   btn.textContent = '⬇ 下载原文件';
   btn.addEventListener('click', () => downloadFile(file));
 
-  box.append(title, intro, list, advice, btn);
+  box.appendChild(btn);
   return box;
 }
 

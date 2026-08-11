@@ -9,6 +9,10 @@ let filePath = '', fileKey = '', fileType = '';    // 'video' or 'audio'
 let fileSize = 0;       // original's byte size, 0 when unknown
 let proxies = [];       // available proxy records
 let activeProxy = null; // currently selected proxy key (or null for original)
+// Every playback source, original first, in the order the picker lists them.
+// Kept at module scope because the "cannot decode" notice offers to switch to
+// another one and is built far from `setupPlayer`.
+let sourceOptions = [];
 let identity = null;
 // staging: a flat list of clips — the one working set.
 // archive:  a list of named sets, `{id, name, description, createdAt, clips}`.
@@ -168,6 +172,7 @@ function setupPlayer() {
     const typeIcon = typeStr === 'audio' ? '🎵' : '🎬';
     options.push({ key: p.key, label: typeIcon + ' ' + (p.label || '代理'), type: typeStr, size: p.size || 0 });
   }
+  sourceOptions = options;
 
   if (options.length > 1) {
     el.proxySelector.hidden = false;
@@ -253,6 +258,10 @@ function switchSource(opt) {
     ? '/api/file/' + encodePath(activeProxy)
     : '/api/file/' + encodePath(fileKey);
 
+  // Unconditionally, before anything else: the previous source may have left a
+  // "cannot decode" notice over the player, and this one deserves a fair try.
+  clearUnplayable();
+
   // Swap between <video> and <audio> elements as needed. Sizing stays in
   // the stylesheet: an inline max-height here would outrank the responsive
   // rules and pin the player at desktop height on a phone.
@@ -274,8 +283,98 @@ function switchSource(opt) {
     el.video = video;
   }
   el.video = el.previewArea.querySelector('video, audio');
+  // Attached here, not once at load: an audio↔video switch above *replaces* the
+  // element, so a listener bound to the page's initial <video> would silently
+  // stop firing after the first swap. Audio needs it as much as video — Opus in
+  // MP4 fails on Safari exactly the same way. `onerror` rather than
+  // `addEventListener`, because a video→video switch keeps the same element and
+  // would otherwise stack one live handler per switch; assigning replaces.
+  el.video.onerror = () => onSourceError(opt, el.video.src);
   el.video.src = src;
   isAudio = isNowAudio;
+}
+
+// A source the browser cannot decode. Nothing server-side can fix a missing
+// decoder, and the clip page's whole job needs a working player, so say so and
+// offer the two ways out instead of leaving the black box this used to be.
+function onSourceError(opt, wantSrc) {
+  const vid = el.video;
+  // `SRC_NOT_SUPPORTED` is the only code that means "no decoder". A network
+  // blip or an aborted load is transient and must not paint over the player.
+  if (!vid || !vid.error || vid.error.code !== vid.error.MEDIA_ERR_SRC_NOT_SUPPORTED) return;
+  // The event can land long after the user picked something else, and painting
+  // the failing source's notice over one that is playing fine reads as the page
+  // being broken. Two ways to be stale, and each needs its own check: a
+  // video→audio switch *replaces* the element, so the old node's handler still
+  // closes over the old `opt` — `activeProxy` catches that; a video→video switch
+  // *reuses* the element and reassigns `onerror` to a closure over the new
+  // `opt`, so only the src the handler was armed for distinguishes them.
+  if ((opt.key || null) !== activeProxy) return;
+  if (vid.src !== wantSrc) return;
+  showUnplayable(opt);
+}
+
+// True when the notice is up, i.e. there is no working player behind it.
+// `⟵ 当前` would otherwise write a confident `0:00.0` off a media element that
+// never loaded, and `▶ 预览` would call play() on a hidden one — both silent,
+// both look like the control is broken rather than the source.
+const NO_PLAYER_HINT = '⚠️ 当前预览源无法播放，请先换用其他来源。';
+function playerUnavailable() {
+  if (!el.previewArea.querySelector('.media-unplayable')) return false;
+  el.wsHint.textContent = NO_PLAYER_HINT;
+  el.wsHint.hidden = false;
+  return true;
+}
+
+function clearUnplayable() {
+  const old = el.previewArea.querySelector('.media-unplayable');
+  if (old) old.remove();
+  el.previewArea.classList.remove('has-notice');
+  // Compared rather than blanket-hidden: the hint is shared, and a source
+  // switch must not swallow an unrelated "set a valid range" warning.
+  if (el.wsHint.textContent === NO_PLAYER_HINT) el.wsHint.hidden = true;
+  const media = el.previewArea.querySelector('video, audio');
+  // The element stays in the DOM through all of this — `⟵ 当前` and ▶ 预览
+  // read it, and `switchSource` re-queries it — so it is hidden, never removed.
+  if (media) media.hidden = false;
+}
+
+function showUnplayable(opt) {
+  const media = el.previewArea.querySelector('video, audio');
+  if (media) media.hidden = true;
+
+  const box = document.createElement('div');
+  box.className = 'media-unplayable';
+  box.append(...VideoCodecs.buildPanel('⚠️ 此浏览器无法解码该预览源'));
+
+  const actions = document.createElement('div');
+  actions.className = 'unplayable-actions';
+
+  // The gallery can only offer a download here. This page has a source picker,
+  // and an undecodable original beside a working H.264 proxy is the case that
+  // matters most — the proxy is what you would be clipping against anyway.
+  const alt = smallestSource(sourceOptions.filter(o => (o.key || null) !== (opt.key || null)));
+  if (alt) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '🔄 换用 ' + alt.label;
+    btn.addEventListener('click', () => {
+      el.proxySelect.value = String(sourceOptions.indexOf(alt));
+      switchSource(alt);
+      updatePreviewNote(sourceOptions, alt);
+    });
+    actions.appendChild(btn);
+  }
+
+  const dl = document.createElement('button');
+  dl.type = 'button';
+  dl.textContent = '⬇ 下载原文件';
+  dl.addEventListener('click', downloadFullFile);
+  actions.appendChild(dl);
+
+  box.appendChild(actions);
+  el.previewArea.appendChild(box);
+  el.previewArea.classList.add('has-notice');
 }
 
 // ── AI assist: the skill, and the admin's related files ──
@@ -458,6 +557,7 @@ function getWorkspaceTimes() {
   return { start, end };
 }
 function setTimeFromMedia(which) {
+  if (playerUnavailable()) return;
   const t = el.video.currentTime;
   if (which === 'start') el.wsStart.value = formatTime(t);
   else el.wsEnd.value = formatTime(t);
@@ -471,6 +571,7 @@ function clearWorkspace() { el.wsStart.value = ''; el.wsEnd.value = ''; workspac
 
 // ── Preview ──
 function previewSegment() {
+  if (playerUnavailable()) return;
   const times = getWorkspaceTimes();
   if (!times) { el.wsHint.textContent = '⚠️ 请设置有效的开始和结束时间'; el.wsHint.hidden = false; return; }
   el.wsHint.hidden = true;

@@ -247,18 +247,35 @@ while Chrome and Firefox both ship a **software AV1 decoder** that works
 everywhere. So HEVC fails on Linux/Firefox, and AV1 fails on older Apple
 hardware. **H.264 is the only universally safe choice.**
 
+The AV1 row is the one that bites in practice, because Safari's AV1 support is
+**hardware only**: an M1 or M2 Mac cannot play these files on any macOS version,
+and no update will change that. That is the case the panel below exists for.
+
 ### When a browser can't decode
 
-No server setting fixes a missing decoder, so the gallery fails loudly instead of
-showing a black player. If `<video>` reports `MEDIA_ERR_SRC_NOT_SUPPORTED`, the
-preview is replaced by a panel that probes this device with `canPlayType` and
-lists what it actually supports (`✅ H.264  ❌ HEVC  ✅ AV1  ✅ VP9`), names the
-browser to switch to for the codec it lacks, and offers a download button — the
-one path that works in every browser.
+No server setting fixes a missing decoder, so the player fails loudly instead of
+showing a black rectangle. If `<video>` reports `MEDIA_ERR_SRC_NOT_SUPPORTED`,
+the preview is replaced by a panel that probes this device with `canPlayType` and
+lists what it actually supports (`✅ H.264  ❌ HEVC  ✅ AV1 (10-bit)  ✅ VP9`),
+names the browser to switch to for the codec it lacks, and offers a download
+button — the one path that works in every browser.
+
+Both players do this, from one shared table in `static/codecs.js`. The clip page
+adds one button the gallery cannot offer: if the source it failed on is not the
+only one, it offers to **switch to the smallest other source**, which is the
+usual fix — an AV1 original that this device cannot decode normally sits beside
+an H.264 proxy that it can, and the proxy is what you would be clipping against
+anyway.
 
 The probe runs *only after* a real failure. As a pre-flight check it would be
 wrong: the file is served as `video/mp4` whatever is inside, so `canPlayType`
 reports browser capability and says nothing about this file's contents.
+
+The AV1 row probes `av01.0.05M.10` — **10-bit**, matching what the encode below
+produces. A software decoder answers the same for 8- and 10-bit, so this changes
+nothing on Chrome or Firefox; it is honest on a device whose AV1 support comes
+from fixed-function hardware, where the two depths can differ. It is not a
+detector for that gap — it is a probe for the profile actually being served.
 
 ### Encoding
 
@@ -281,8 +298,35 @@ ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \
   -movflags +faststart out_h264.mp4
 ```
 
-AV1 — `-c:v av1_nvenc` needs a 40-series (Ada) GPU or newer; on older cards use
-`-c:v libaom-av1 -crf 30 -b:v 0` or `libsvtav1`, both much slower than NVENC.
+AV1 — SVT-AV1 on the CPU. This is what the archive is actually encoded with:
+
+```bash
+ffmpeg -i "$VIDEO" \
+  -c:v libsvtav1 -crf 32 -preset 6 \
+  -svtav1-params keyint=3s:enable-variance-boost=1 \
+  -pix_fmt yuv420p10le \
+  -c:a copy \
+  -movflags +faststart \
+  "chuan/$VIDEO"
+```
+
+- **`-pix_fmt yuv420p10le`** — 10-bit, even from an 8-bit source: it gives the
+  encoder more precision in its internal transforms, which is what removes the
+  banding 8-bit AV1 shows on gradients and dark scenes. This is also why the
+  browser probe above is `…M.10` — the file this produces is 10-bit whatever
+  the source was.
+- **`-preset 6`** — SVT-AV1's speed/efficiency dial, 0 (slowest) to 13. 6 is the
+  usual archive compromise; going lower costs a lot of wall-clock time.
+- **`-crf 32`** — a quality target, not a bitrate. AV1's CRF scale is not
+  H.264's; tune it on your own footage rather than translating a number across.
+- **`enable-variance-boost=1`** — spends more bits on flat, low-variance regions,
+  which is where AV1 at a high CRF looks worst. Same motivation as 10-bit.
+- **`keyint=3s`** — see the GOP note below. Expressed in *seconds*, so it does
+  not silently mean something different for 30 fps and 60 fps sources.
+
+`-c:v av1_nvenc` is the GPU alternative and needs a 40-series (Ada) card or
+newer; `libaom-av1 -crf 30 -b:v 0` is the reference encoder and is far slower
+than SVT-AV1 for no gain here.
 
 Flags that matter for playback through this worker specifically:
 
@@ -292,13 +336,16 @@ Flags that matter for playback through this worker specifically:
 - **`-movflags +faststart`** — moves the `moov` atom to the front. Without it the
   player must fetch the tail before it can start, so playback stalls until most
   of the file has downloaded. Applies to every codec.
-- **`-g 48`** — a keyframe every ~2s bounds how precisely a seek can land, and
-  also how precisely a clip can *start*: both the one-click download and the
-  ffmpeg command cut on a keyframe, so a longer GOP means a clip that begins
-  further before the mark that was set. The worker's HTTP Range support (`206`
-  on `/api/file/{key}`) is what turns a seek into a small ranged fetch instead
-  of a full download — and is what makes the in-browser clipping possible at
-  all.
+- **`-g 48` / `keyint=3s`** — the keyframe interval bounds how precisely a seek
+  can land, and also how precisely a clip can *start*: both the one-click
+  download and the ffmpeg command cut on a keyframe, so a longer GOP means a
+  clip that begins further before the mark that was set. `-g 48` is a frame
+  count, so it is ~2s at 24–25 fps but only 0.8s at 60 fps; SVT-AV1's
+  `keyint=3s` is a duration and means 3s at any frame rate — so an AV1 clip can
+  begin up to 3 seconds early, and the clip page says which second it actually
+  starts on. The worker's HTTP Range support (`206` on `/api/file/{key}`) is
+  what turns a seek into a small ranged fetch instead of a full download — and
+  is what makes the in-browser clipping possible at all.
 
 `-c:a copy` keeps the source's audio codec. If your sources aren't uniform, use
 `-c:a aac -b:a 192k` — Opus in MP4, for example, will not play in Safari, and
@@ -334,6 +381,7 @@ file_worker/
 │   ├── admin.html       # Admin upload page
 │   ├── admin.js / .css  #   its logic and styles
 │   ├── mp4clip.js       # In-browser MP4 cutting (remux, no re-encode)
+│   ├── codecs.js        # Codec probe + "can't decode" panel, shared by both players
 │   └── style.css        # Shared cat-themed styles
 └── README.md
 ```

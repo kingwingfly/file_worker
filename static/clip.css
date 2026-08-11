@@ -44,6 +44,32 @@
 .preview-area { background: #101010; border-radius: var(--radius-sm); overflow: hidden; }
 .preview-area video { width: 100%; display: block; max-height: 56vh; background: #101010; outline: none; }
 .preview-area audio { width: 100%; display: block; padding: 1rem; }
+/* Shown in place of a source this device has no decoder for. It lives inside
+   `.preview-area` (dark), so it is styled like the gallery's modal notice
+   rather than like the page — and separately from it, because that rule is
+   scoped to `.modal-media`. The player is hidden, not removed, so the box has
+   to supply its own height; `.preview-area` has `overflow: hidden`, and the
+   buttons are the only way out of this state, so nothing here may be clipped. */
+.preview-area .media-unplayable { color: #f0f0f0; text-align: center; padding: 2rem 1.25rem; }
+/* Under 1024px `.stage-card` is a capped (`62dvh`) scrolling flex column, so its
+   children shrink to fit rather than overflow — measured at 390px the area was
+   squeezed from 324px to 310px and `overflow: hidden` ate the last 14px, which
+   is the row of buttons on a shorter phone. Refusing to shrink hands the
+   overflow to the card, which already scrolls. Set only while the notice is up,
+   so the video keeps its `34dvh` cap the rest of the time. */
+.preview-area.has-notice { flex-shrink: 0; }
+.preview-area .media-unplayable h3 { font-size: 1rem; margin-bottom: 0.7rem; }
+.preview-area .media-unplayable p { font-size: 0.85rem; line-height: 1.6; color: #b8b8b8; margin-bottom: 1rem; }
+.preview-area .media-unplayable .codec-support { display: flex; flex-wrap: wrap; gap: 0.35rem 0.7rem;
+                                                 justify-content: center; margin: -0.6rem 0 1rem; font-size: 0.8rem; }
+.preview-area .media-unplayable .codec-support .ok { color: #8fd19e; }
+.preview-area .media-unplayable .codec-support .no { color: #f1948a; }
+.unplayable-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; }
+.unplayable-actions button { padding: 0.45rem 1.1rem; border-radius: 999px; border: none; background: var(--pink);
+                             color: var(--white); font-family: inherit; font-size: 0.83rem; font-weight: 600;
+                             cursor: pointer; transition: var(--transition); }
+.unplayable-actions button:hover { filter: brightness(1.08); }
+
 .preview-fallback { color: var(--text-light); text-align: center; padding: 0.5rem; font-size: 0.82rem; }
 .note-switch { border: 1px solid var(--soft-blue); background: var(--white); color: var(--text);
                border-radius: 999px; padding: 0.2rem 0.7rem; font-size: 0.78rem; font-family: inherit;

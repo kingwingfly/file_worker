@@ -358,10 +358,51 @@ backwards:
 Because the served type is `video/mp4` whatever is inside, the player cannot know
 in advance whether a file is decodable. Do **not** add a `canPlayType` gate before
 playback — it reports browser support, not file contents, and would warn on H.264
-files too. The `<video>` `error` listener in `openPreview` checks for
-`MEDIA_ERR_SRC_NOT_SUPPORTED`; only then does `unplayableNotice` probe all four
-codecs to describe the device and offer a download. Post-failure diagnosis is the
-correct use of `canPlayType`; pre-flight gating is not.
+files too. Post-failure diagnosis is the correct use of `canPlayType`; pre-flight
+gating is not.
+
+The codec table, the probe and the panel body live in `static/codecs.js`, because
+there are **two** players and they must answer identically. Each page attaches its
+own `error` listener and appends its own actions:
+
+- Gallery (`app.js`, in `openPreview`) replaces the whole `<video>` with the
+  notice — the modal is torn down on close, so nothing else refers to it.
+- Clip page (`clip.js`, in `switchSource` → `onSourceError`) **hides** the media
+  element instead of removing it. `⟵ 当前`, `▶ 预览` and `switchSource` itself all
+  dereference `el.video`; removing it turns an undecodable source into a page
+  full of `TypeError`s. It also adds a 换用 button when another source exists —
+  an AV1 original this device can't decode usually sits beside a proxy it can.
+
+Three things in the clip page's version that look incidental:
+
+- The listener is attached **inside `switchSource`, on every switch**, not once at
+  load. An audio↔video switch replaces the element, so a listener bound to the
+  page's initial `<video>` silently stops firing after the first swap. It is
+  `onerror =` rather than `addEventListener`, because a video→video switch keeps
+  the same element and would otherwise stack one live handler per switch.
+- `onSourceError` bails on a stale event, and needs **two** checks to do it,
+  because there are two ways to go stale. A video↔audio switch *replaces* the
+  element, so the abandoned node's handler still closes over the old `opt` —
+  `activeProxy` catches that. A video→video switch *reuses* the element and
+  rearms `onerror` with the new `opt`, so that check passes and only the src the
+  handler was armed for (`vid.src !== wantSrc`) tells them apart. Either one
+  alone lets a failing source paint its notice over one that is playing fine,
+  which reads as the feature being broken.
+- `⟵ 当前` and `▶ 预览` refuse while the notice is up (`playerUnavailable()`).
+  There is no decoder behind that box, so the first would write a confident
+  `0:00.0` off a media element that never loaded and the second would `play()` a
+  `display: none` element — both silently, both looking like the control is
+  broken rather than the source.
+- `.preview-area` gets `has-notice` (→ `flex-shrink: 0`) while the notice is up.
+  Under 1024px `.stage-card` is a `62dvh`-capped scrolling flex column, so its
+  children shrink to fit and `.preview-area`'s `overflow: hidden` clips the
+  bottom of the notice — measured at 390px it ate 14px, and on a shorter phone
+  that is the button row, i.e. the only way out of the state.
+
+The AV1 row probes `av01.0.05M.10` (10-bit), matching the `-pix_fmt yuv420p10le`
+encode the archive uses. A software decoder answers the same for both depths, so
+it is behaviour-neutral on Chrome and Firefox — it is not a bit-depth detector,
+it just probes what is actually served.
 
 Deliberately not implemented: parsing the MP4 `stsd` box (via a Range fetch) to
 name the file's actual codec. It ends at the same download button, and needs a
@@ -414,8 +455,13 @@ Plain HTML/CSS/JS, no build step. Each page is three files:
 | `clip.html` | `clip.js` | `style.css` + `clip.css` |
 | `admin.html` | `admin.js` | `style.css` + `admin.css` |
 
-Plus `mp4clip.js`, loaded by both `index.html` and `clip.html` — **before** their
-own script in both, since they call into it at click time.
+Plus two shared scripts, `mp4clip.js` and `codecs.js`, loaded by both
+`index.html` and `clip.html` — **before** their own script in both, since they
+call into them at click time and at media-error time. Both namespace themselves
+(`window.MP4Clip`, `window.VideoCodecs`) rather than declaring top-level names:
+classic scripts share one global lexical scope, so a bare `const` here would be
+a `SyntaxError` the moment a page script picked the same name, and that takes
+the whole page down, not just the collision.
 
 `style.css` is shared and holds the tokens; `clip.css` / `admin.css` hold only
 what is page-specific. The split was mechanical (the tags were replaced by
