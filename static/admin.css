@@ -377,6 +377,65 @@
 
 .btn-rename-cancel:hover { background: #e0e0e0; }
 
+/* Delete dialog — the rename dialog plus an impact block and a proxy picker.
+   Wider than rename because it lists what is about to be destroyed, and that
+   list reads badly wrapped at 320px. */
+.delete-dialog { min-width: 380px; }
+
+.delete-dialog .delete-impact p {
+  font-size: 0.88rem;
+  line-height: 1.6;
+  margin-bottom: 0.5rem;
+}
+
+/* The no-proxy case is the irreversible one, so it is the only text in the
+   dialog that is coloured as a warning. */
+.delete-dialog .delete-warn {
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.delete-dialog .delete-promote {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--soft-blue);
+}
+
+.delete-dialog .delete-promote select {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 0.9rem;
+  background: var(--white);
+}
+
+/* Purge is destructive and never the suggested action, so it is the plain
+   button and 用代理替换 keeps the accent — the reverse would nudge the admin
+   toward the one choice that cannot be undone. */
+.btn-delete-purge {
+  background: #f0f0f0;
+  color: #c0392b;
+}
+
+.btn-delete-purge:hover { background: #f7d9d5; }
+.btn-delete-purge:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Attach dialog reuses .delete-dialog's width — it has the same shape (a
+   picker plus explanatory text) and the target paths are just as long. */
+.rename-dialog #groupinto-target {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 0.9rem;
+  background: var(--white);
+}
+
+.rename-dialog .attach-label-row { margin-top: 0.75rem; }
+
 /* Visibility is driven by the `hidden` attribute, which is how every
    caller toggles this. It used to be `display: none` here plus a `.show`
    class that nothing ever added — a class selector outranks the UA's

@@ -124,13 +124,15 @@ npx wrangler deploy
 | DELETE | `/admin/api/upload?upload_id=&key=` | Abort a multipart upload |
 | POST | `/admin/api/files/check-key` | Check whether a display path would collide |
 | POST | `/admin/api/files/rename` | Rename — one D1 `UPDATE`, no R2 work |
-| DELETE | `/admin/api/files/{path}` | Delete file from R2 + D1 |
+| POST | `/admin/api/files/attach` | Fold a file into another file's collection as a proxy (D1 only) |
+| POST | `/admin/api/proxy/detach` | Lift a proxy back out into its own file (D1 only) |
+| DELETE | `/admin/api/files/{path}` | Delete. 409s with the impact unless `?mode=purge` or `?mode=promote&promote_key=` |
 | POST | `/admin/api/proxy/start` | Start proxy upload `{file_path, filename, label}` |
-| POST | `/admin/api/proxy/complete` | Finish proxy upload + D1 insert |
+| POST | `/admin/api/proxy/complete` | Finish proxy upload + D1 insert (409s if the file was deleted meanwhile) |
 | GET | `/admin/api/proxy?file_path=` | List proxies for a file (admin) |
 | DELETE | `/admin/api/proxy?key=` | Delete a proxy by R2 key |
 | POST | `/admin/api/attachment/start` | Start attachment upload `{file_path, filename, label}` |
-| POST | `/admin/api/attachment/complete` | Finish attachment upload + D1 insert |
+| POST | `/admin/api/attachment/complete` | Finish attachment upload + D1 insert (409s if the file was deleted meanwhile) |
 | GET | `/admin/api/attachment?file_path=` | List attachments for a file (admin) |
 | DELETE | `/admin/api/attachment?key=` | Delete an attachment by R2 key |
 | GET | `/admin/api/clips` | List all clips |

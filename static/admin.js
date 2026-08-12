@@ -676,11 +676,21 @@ async function runUpload(file, session) {
         }
       );
       if (completeResp.status === 409) {
-        // Someone took this name while the session was paused. The server
-        // refused rather than overwriting them — this session is dead.
+        // Two different dead-session verdicts share this status, and both are
+        // fatal — the server has already refused, so Resume can only loop.
+        //   `duplicate`  someone took this name while the session was paused
+        //   `file_gone`  the parent file was deleted under an attach upload;
+        //                the server aborted the multipart upload on its way out
+        // The message must come from the server for `file_gone`: it is the only
+        // thing that tells the admin the *file* went away rather than the name
+        // being taken, and sending them to re-upload a proxy for a file that no
+        // longer exists is a guaranteed second failure.
         const d = await completeResp.json().catch(() => ({}));
         throw uploadError(
-          `名称 "${d.path || session.path}" 已被其他文件占用，无法完成续传。`, 409, true);
+          d.error === 'duplicate' || !d.message
+            ? `名称 "${d.path || session.path}" 已被其他文件占用，无法完成续传。`
+            : d.message,
+          409, true);
       }
       if (!completeResp.ok) {
         throw uploadError(await errorMessage(completeResp), completeResp.status);
@@ -994,7 +1004,19 @@ function renderFileList(files) {
     delBtn.textContent = '🗑 删除';
     delBtn.addEventListener('click', () => deleteFile(path));
 
-    actions.append(renameBtn, delBtn);
+    actions.append(renameBtn);
+    // Only playable files can become a proxy — a proxy is a playback source,
+    // and the server refuses anything else. Hiding the button on an image is
+    // cheaper than explaining the refusal afterwards.
+    if (isPlayable(f)) {
+      const attachBtn = document.createElement('button');
+      attachBtn.className = 'btn-file-action';
+      attachBtn.textContent = '🔗 归入';
+      attachBtn.title = '把这个文件作为另一个文件的代理';
+      attachBtn.addEventListener('click', () => attachFileDialog(f));
+      actions.append(attachBtn);
+    }
+    actions.append(delBtn);
     // Size and actions share a wrapper so the ≤640 rule can drop the name
     // onto its own line and keep those two together underneath it.
     const meta = document.createElement('div');
@@ -1025,15 +1047,247 @@ async function errorMessage(resp) {
   return text.trim() ? `HTTP ${resp.status}: ${text.trim().slice(0, 300)}` : `HTTP ${resp.status}`;
 }
 
+// Deleting a file is never just one row: clips, clip sets, attachments and
+// proxies all hang off `files.path`. The server refuses a bare DELETE whenever
+// any of them exist and answers 409 `confirm_required` with the counts, so this
+// runs in two round trips — ask, then act on the admin's choice. A file with
+// nothing attached (the common case) still deletes on the first call, so the
+// dialog only ever appears when there is something to lose.
 async function deleteFile(path) {
+  // This confirm stays, and stays *first*. The impact is only known from the
+  // server's refusal, which arrives after the request — so discovering the
+  // impact cannot be what gates the first destructive call. A bare file (the
+  // common case) is deleted by that call, exactly as before.
   if (!confirm(`确认删除 "${path}"?`)) return;
+  let plan;
   try {
     const resp = await fetch(`/admin/api/files/${encodePath(path)}`, { method: 'DELETE' });
-    if (resp.ok) {
-      loadFiles();
-    } else {
-      alert('删除失败: ' + await errorMessage(resp));
+    if (resp.ok) { loadFiles(); return; }
+    if (resp.status !== 409) { alert('删除失败: ' + await errorMessage(resp)); return; }
+    plan = await resp.json();
+    if (plan.error !== 'confirm_required') { alert('删除失败: ' + (plan.message || '')); return; }
+  } catch (err) {
+    alert('网络错误: ' + err.message);
+    return;
+  }
+  showDeletePlan(path, plan);
+}
+
+function showDeletePlan(path, plan) {
+  const proxies = Array.isArray(plan.proxies) ? plan.proxies : [];
+  const overlay = document.createElement('div');
+  overlay.className = 'rename-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="rename-dialog delete-dialog">
+      <h3>🗑 删除文件</h3>
+      <div class="rename-oldpath"></div>
+      <div class="delete-impact"></div>
+      <div class="delete-promote" hidden>
+        <label class="rename-label" for="promote-select">保留切片：用哪个代理接替原片</label>
+        <select id="promote-select"></select>
+        <div class="rename-hint" id="promote-hint"></div>
+      </div>
+      <div class="rename-dialog-actions">
+        <button class="btn-rename-cancel">取消</button>
+        <button class="btn-delete-purge">全部删除</button>
+        <button class="btn-rename-confirm btn-delete-promote" hidden>用代理替换原片</button>
+      </div>
+    </div>
+  `;
+  // Paths, labels and keys are user-controlled — every one of them goes in via
+  // textContent / option.value, never interpolated into the markup above.
+  overlay.querySelector('.rename-oldpath').textContent = path;
+
+  const impact = overlay.querySelector('.delete-impact');
+  const lost = [];
+  if (plan.clips) lost.push(`${plan.clips} 个切片`);
+  if (plan.clip_sets) lost.push(`${plan.clip_sets} 个切片合集`);
+  if (plan.attachments) lost.push(`${plan.attachments} 个关联文件`);
+  if (proxies.length) lost.push(`${proxies.length} 个代理`);
+  const line = document.createElement('p');
+  line.textContent = '该文件关联了 ' + (lost.join('、') || '内容') + '。';
+  impact.appendChild(line);
+
+  const promoteBox = overlay.querySelector('.delete-promote');
+  const promoteBtn = overlay.querySelector('.btn-delete-promote');
+  const select = overlay.querySelector('#promote-select');
+  const hint = overlay.querySelector('#promote-hint');
+
+  if (proxies.length) {
+    // Biggest-with-a-picture is the server's suggestion and it is preselected,
+    // so the default needs no interaction — but it is named in full, because
+    // which copy becomes the master is not a detail the admin should discover
+    // afterwards from a shrunken file size.
+    proxies.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = p.key;
+      const audio = (p.content_type || '').startsWith('audio/');
+      opt.textContent = `${p.label || '(无标签)'} — ${formatSize(p.size)}${audio ? ' · 纯音频' : ''}`;
+      if (p.key === plan.suggested_key) opt.selected = true;
+      select.appendChild(opt);
+    });
+    const describe = () => {
+      const p = proxies.find((x) => x.key === select.value);
+      const audio = p && (p.content_type || '').startsWith('audio/');
+      hint.textContent = audio
+        ? '⚠️ 这是纯音频代理。替换后该文件在画廊里会变成音频，切片将没有画面。'
+        : '原片将被删除以释放空间，切片、合集和关联文件全部保留 —— 代理与原片时间轴一致，所有时间点依然有效。';
+    };
+    select.addEventListener('change', describe);
+    describe();
+    promoteBox.hidden = false;
+    promoteBtn.hidden = false;
+  } else {
+    const warn = document.createElement('p');
+    warn.className = 'delete-warn';
+    warn.textContent = '没有代理可以接替原片，以上内容将一并永久删除，无法恢复。';
+    impact.appendChild(warn);
+  }
+
+  document.body.appendChild(overlay);
+
+  const purgeBtn = overlay.querySelector('.btn-delete-purge');
+  const cancelBtn = overlay.querySelector('.btn-rename-cancel');
+  const close = () => overlay.remove();
+
+  async function send(query, busyLabel, btn) {
+    const original = btn.textContent;
+    purgeBtn.disabled = promoteBtn.disabled = true;
+    btn.textContent = busyLabel;
+    try {
+      const resp = await fetch(`/admin/api/files/${encodePath(path)}?${query}`, { method: 'DELETE' });
+      if (resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        close();
+        // Promotion is announced, purge is not. `showResult` writes into the
+        // upload panel, which is usually scrolled away from the file list, and
+        // the file surviving at a new size is surprising enough that the admin
+        // has to be told which copy became the master. A purge needs no notice:
+        // the row disappearing from the refreshed list is the confirmation.
+        if (d.promoted) {
+          alert(`已用代理「${d.label || '(无标签)'}」替换原片 (${formatSize(d.size)})。\n切片、合集和关联文件全部保留。`);
+        }
+        loadFiles();
+        return;
+      }
+      alert('操作失败: ' + await errorMessage(resp));
+    } catch (err) {
+      alert('网络错误: ' + err.message);
     }
+    purgeBtn.disabled = promoteBtn.disabled = false;
+    btn.textContent = original;
+  }
+
+  promoteBtn.addEventListener('click', () =>
+    send('mode=promote&promote_key=' + encodeURIComponent(select.value), '⏳ ...', promoteBtn));
+  purgeBtn.addEventListener('click', () => {
+    if (!confirm(`确认永久删除 "${path}" 及其全部关联内容？`)) return;
+    send('mode=purge', '⏳ ...', purgeBtn);
+  });
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+}
+
+// ── Collections: fold a file in as a proxy, or lift one back out ──
+//
+// A collection is not a table — it is a `files` row plus the proxies and
+// related files naming its path. So both directions are pure D1 row moves and
+// return instantly whatever the file weighs; nothing here uploads or copies.
+// This dialog is the "gather what I already uploaded" half; the "add by
+// uploading" half is the 📹 代理 mode of the upload section.
+function attachFileDialog(file) {
+  const source = file.path || file.key;
+  const targets = proxyFileData.filter(f => (f.path || f.key) !== source);
+  // Its ids are `groupinto-*`, not `attach-*`: the upload section already owns
+  // `#attach-target` / `#attach-label`, and a duplicate id points this dialog's
+  // `<label for=>` at the element behind the overlay.
+
+  const overlay = document.createElement('div');
+  overlay.className = 'rename-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="rename-dialog delete-dialog">
+      <h3>🔗 归入合集</h3>
+      <div class="rename-oldpath"></div>
+      <label class="rename-label" for="groupinto-target">作为哪个文件的代理</label>
+      <select id="groupinto-target"></select>
+      <label class="rename-label attach-label-row" for="groupinto-label">标签</label>
+      <input type="text" id="groupinto-label" maxlength="32">
+      <div class="rename-hint">该文件将从列表中消失，成为目标文件的一个播放源。不移动任何数据，随时可以「⤴ 独立」还原。</div>
+      <div class="rename-dialog-actions">
+        <button class="btn-rename-cancel">取消</button>
+        <button class="btn-rename-confirm btn-groupinto-confirm">归入</button>
+      </div>
+    </div>
+  `;
+  overlay.querySelector('.rename-oldpath').textContent = source;
+  const select = overlay.querySelector('#groupinto-target');
+  // `new Option`, not innerHTML — paths are user-controlled.
+  if (targets.length) {
+    select.replaceChildren(...targets.map(f => new Option(
+      `${f.path || f.key} (${formatSize(f.size)})`, f.path || f.key)));
+  } else {
+    select.replaceChildren(new Option('（没有其他视频/音频文件）', ''));
+  }
+  const labelInput = overlay.querySelector('#groupinto-label');
+  labelInput.value = (source.split('/').pop() || source).slice(0, 32);
+  document.body.appendChild(overlay);
+
+  const confirmBtn = overlay.querySelector('.btn-groupinto-confirm');
+  const cancelBtn = overlay.querySelector('.btn-rename-cancel');
+  confirmBtn.disabled = !targets.length;
+  const close = () => overlay.remove();
+
+  confirmBtn.addEventListener('click', async () => {
+    if (!select.value) return;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '⏳ ...';
+    try {
+      const resp = await fetch('/admin/api/files/attach', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_path: source,
+          target_path: select.value,
+          label: labelInput.value.trim(),
+        }),
+      });
+      if (resp.ok) { close(); loadFiles(); return; }
+      // 409 `source_not_empty` is the one worth spelling out: the source has
+      // clips or related files of its own, which would be orphaned when its
+      // `files` row goes. The server's message says so; the counts say how much.
+      const d = await resp.json().catch(() => ({}));
+      if (d.error === 'source_not_empty') {
+        const bits = [];
+        if (d.clips) bits.push(`${d.clips} 个切片`);
+        if (d.clip_sets) bits.push(`${d.clip_sets} 个合集`);
+        if (d.attachments) bits.push(`${d.attachments} 个关联文件`);
+        if (d.proxies) bits.push(`${d.proxies} 个代理`);
+        alert(`无法归入：该文件自己有 ${bits.join('、')}，归入后会失去归属。\n请先处理它们。`);
+      } else {
+        alert('归入失败: ' + (d.message || d.error || resp.status));
+      }
+    } catch (err) {
+      alert('网络错误: ' + err.message);
+    }
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = '归入';
+  });
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+}
+
+async function detachProxy(proxy, onDone) {
+  const fallback = (proxy.key.split('/').pop() || 'proxy');
+  const path = prompt('还原为独立文件，新文件名：', fallback);
+  if (path === null) return;
+  try {
+    const resp = await fetch('/admin/api/proxy/detach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: proxy.key, path: path.trim() }),
+    });
+    if (resp.ok) { onDone(); loadFiles(); return; }
+    alert('还原失败: ' + await errorMessage(resp));
   } catch (err) {
     alert('网络错误: ' + err.message);
   }
@@ -1155,8 +1409,16 @@ let proxyFileData = []; // { file_path, key } from the file listing
 // temporal dead zone until this line of the script has run.
 loadFiles();
 
+// A proxy is a playback source, so both ends of an attach have to be one. Same
+// predicate the proxy section uses to decide which files can carry proxies at
+// all, and the same rule the server enforces.
+function isPlayable(f) {
+  const ct = f.content_type || '';
+  return ct.startsWith('video/') || ct.startsWith('audio/');
+}
+
 function updateProxySection(files) {
-  proxyFileData = files.filter(f => (f.content_type || '').startsWith('video/') || (f.content_type || '').startsWith('audio/'));
+  proxyFileData = files.filter(isPlayable);
   renderAttachTargets();
   if (proxyFileData.length === 0) {
     proxyList.replaceChildren(mkNote('admin-empty', '没有可代理的视频/音频文件。'));
@@ -1190,7 +1452,13 @@ function renderAttachTargets() {
 // file_path — so one renderer serves them, driven by the same ATTACH_SPECS the
 // uploader uses. `noun` and `icon` are the only per-kind UI text.
 const ATTACH_VIEWS = {
-  proxy: { spec: ATTACH_SPECS.proxy, icon: '📹', noun: '代理', addHint: '在上方「📹 代理」模式中添加。' },
+  // `detachable` only on proxies: an attachment is a download bound to a file
+  // (subtitles for *that* video), not an encode of it, so there is no standalone
+  // file for it to become.
+  proxy: {
+    spec: ATTACH_SPECS.proxy, icon: '📹', noun: '代理', detachable: true,
+    addHint: '在上方「📹 代理」模式中添加，或在文件列表用「🔗 归入」把已上传的文件收进来。',
+  },
   attachment: {
     spec: ATTACH_SPECS.attachment, icon: '📎', noun: '关联文件',
     addHint: '在上方「📎 关联文件」模式中添加。',
@@ -1242,7 +1510,20 @@ function renderAttachDetail(view, file, panel, btn, records) {
         toggleAttachDetail(view, file, panel, btn);
       } else alert('删除失败');
     });
-    line.append(label, del);
+    if (view.detachable) {
+      const out = document.createElement('button');
+      out.className = 'btn-file-action';
+      out.textContent = '⤴ 独立';
+      out.title = '还原为独立文件（不移动数据）';
+      out.addEventListener('click', () => detachProxy(p, () => {
+        panel.hidden = true;
+        btn.textContent = view.icon + ' ' + view.noun;
+        toggleAttachDetail(view, file, panel, btn);
+      }));
+      line.append(label, out, del);
+    } else {
+      line.append(label, del);
+    }
     return line;
   });
 

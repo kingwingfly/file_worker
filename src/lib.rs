@@ -1101,27 +1101,165 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 }
             };
 
+            // Four tables hang off `files.path`, two of them owning R2 objects,
+            // so deleting a file is never just one row. `mode` says which of the
+            // two outcomes the admin picked; with no mode the route *refuses* and
+            // reports the impact instead of guessing. Refusing is the safe
+            // default: a caller that predates this (or a stray curl) cannot
+            // silently destroy clips it never knew about.
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let mode = qs.get("mode").map(|s| s.as_str()).unwrap_or("");
+
+            let counts = db::count_attached(&ctx, &path).await?;
+            let proxies = db::list_proxies(&ctx, &path).await?;
+
+            // Suggested successor: the biggest proxy that still has a picture.
+            // Biggest because it is replacing the original and becomes the export
+            // source — the clip page will still default its *preview* to the
+            // smallest. Picture first because promoting an audio-only proxy for a
+            // video moves the file into the gallery's 音频 filter and leaves every
+            // clip without a frame to cut against; it stays eligible as a last
+            // resort, since no source at all is worse.
+            // The tuple orders picture over sound first (`true > false`), size
+            // second, in one pass.
+            let suggested = proxies
+                .iter()
+                .max_by_key(|p| (!p.content_type.starts_with("audio/"), p.size));
+
+            if mode.is_empty() && !counts.is_empty() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "confirm_required",
+                    "path": path,
+                    "clips": counts.clips,
+                    "clip_sets": counts.clip_sets,
+                    "attachments": counts.attachments,
+                    "proxies": proxies,
+                    "suggested_key": suggested.map(|p| p.key.clone()),
+                    "message": "该文件有关联内容，请选择处理方式。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+
+            // ── Promote: drop the original's bytes, keep the file ──
+            //
+            // Not a delete at all — the `files` row survives under the same path,
+            // now backed by the proxy's object. That is the whole point: every
+            // clip, set and attachment joins on the path and a proxy shares the
+            // original's timeline, so nothing needs repointing and no time range
+            // stops meaning what it meant. Costs one 40 GB object, keeps the work
+            // built on top of it.
+            if mode == "promote" {
+                let want = qs.get("promote_key").map(|s| s.as_str()).unwrap_or("");
+                // Membership in *this path's* proxies, never `proxy_exists` — that
+                // is a global "is this a proxy anywhere" check, so it would happily
+                // repoint this row at another file's playback source and hand the
+                // next delete of this row that file's object to destroy.
+                let promoted = match proxies.iter().find(|p| p.key == want) {
+                    Some(p) => p,
+                    None => {
+                        return Ok(Response::from_json(&serde_json::json!({
+                            "error": "bad_promote_key",
+                            "message": "指定的代理不属于该文件。",
+                        }))?
+                        .with_status(400)
+                        .with_headers(cors::headers()?))
+                    }
+                };
+
+                // Object first: if the D1 batch then fails, the row still points
+                // at a now-missing key and a retry replays cleanly (the R2 delete
+                // is idempotent and the proxy is still listed). The reverse order
+                // would report success with the original's bytes still billed.
+                bucket.delete(&record.key).await?;
+                db::promote_proxy_to_file(&ctx, &path, promoted).await?;
+
+                console_log!(
+                    "Promoted proxy {} to source of {} (dropped {})",
+                    promoted.key, path, record.key
+                );
+                return Ok(Response::from_json(&serde_json::json!({
+                    "ok": true,
+                    "promoted": path,
+                    "key": promoted.key,
+                    "label": promoted.label,
+                    "size": promoted.size,
+                    "content_type": promoted.content_type,
+                }))?
+                .with_headers(cors::headers()?));
+            }
+
+            if !mode.is_empty() && mode != "purge" {
+                return Ok(Response::error("Bad Request: unknown mode", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            // ── Purge: the file and everything built on it ──
+            //
             // Delete from R2 first, then D1.
             // If R2 fails, D1 row remains visible → retryable from UI.
             // If D1 fails after R2 success, the object is already gone
             // but retry works (R2 delete is idempotent, D1 delete is a no-op).
-            let bucket = ctx.bucket("FILE_BUCKET")?;
             bucket.delete(&record.key).await?;
 
             // Proxies are separate R2 objects keyed off the display path. Once
             // the `files` row is gone nothing can enumerate them again, so they
             // have to go here or they leak in the bucket forever.
+            //
+            // Which is exactly why a failed object delete must NOT drop the row:
+            // the row is the only surviving name for that key, so swallowing the
+            // error and deleting it anyway strands the object permanently — the
+            // one outcome this block exists to prevent. Failures are collected
+            // and the route bails below, before `delete_by_path`, leaving the
+            // `files` row as the retry anchor. Every step here is idempotent, so
+            // the retry finishes the job.
+            let mut stranded = 0usize;
+
+            let mut proxies_ok = true;
             for proxy_key in db::list_proxy_keys(&ctx, &path).await? {
-                let _ = bucket.delete(&proxy_key).await;
+                if bucket.delete(&proxy_key).await.is_err() {
+                    console_log!("Delete {}: proxy object {} not removed", path, proxy_key);
+                    proxies_ok = false;
+                    stranded += 1;
+                }
             }
-            db::delete_proxies_for_path(&ctx, &path).await?;
+            if proxies_ok {
+                db::delete_proxies_for_path(&ctx, &path).await?;
+            }
 
             // Attachments are separate R2 objects for the same reason and with
             // the same consequence — nothing enumerates them once the row is gone.
+            let mut attachments_ok = true;
             for attachment_key in db::list_attachment_keys(&ctx, &path).await? {
-                let _ = bucket.delete(&attachment_key).await;
+                if bucket.delete(&attachment_key).await.is_err() {
+                    console_log!("Delete {}: attachment object {} not removed", path, attachment_key);
+                    attachments_ok = false;
+                    stranded += 1;
+                }
             }
-            db::delete_attachments_for_path(&ctx, &path).await?;
+            if attachments_ok {
+                db::delete_attachments_for_path(&ctx, &path).await?;
+            }
+
+            // Bail before the clips, not after: clips carry no R2 object, so
+            // deleting them is pure irreversible data loss, and doing it on a
+            // run that is about to be retried destroys them while the file is
+            // still listed as present.
+            if stranded > 0 {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "cleanup_failed",
+                    "message": format!(
+                        "{stranded} 个关联对象删除失败，文件记录已保留，请重试删除。"
+                    ),
+                    "stranded": stranded,
+                }))?
+                .with_status(502)
+                .with_headers(cors::headers()?));
+            }
 
             let clips_deleted = db::delete_clips_for_path(&ctx, &path).await?;
 
@@ -1132,6 +1270,167 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 "ok": true,
                 "deleted": path,
                 "clips_deleted": clips_deleted,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/files/attach — fold a standalone file into another
+        // file's collection as a proxy.
+        //
+        // A "collection" here is not a table: it is a `files` row plus the
+        // `proxy_videos` / `file_attachments` rows naming its path. So grouping
+        // two separately uploaded encodes is one row moving between two tables —
+        // D1 only, no R2 work, instant whatever the file weighs. This is the
+        // inverse of `?mode=promote` on the delete route, and the pair is what
+        // lets an admin rearrange which encode is the master at will.
+        //
+        // Deliberately a POST with a JSON body rather than a path-param route:
+        // it takes *two* user-controlled paths, and `matchit` allows a catch-all
+        // only as the final segment, so `/admin/api/files/*source/attach/*target`
+        // cannot exist (see CLAUDE.md — a bad pattern panics every route).
+        .post_async("/admin/api/files/attach", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Attach by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let source_path = body["source_path"].as_str().unwrap_or("").to_string();
+            let target_path = body["target_path"].as_str().unwrap_or("").to_string();
+
+            if source_path.is_empty() || target_path.is_empty() {
+                return Ok(Response::error("Bad Request: missing source_path or target_path", 400)?
+                    .with_headers(cors::headers()?));
+            }
+            if source_path == target_path {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "same_file",
+                    "message": "不能把文件关联到它自己。",
+                }))?
+                .with_status(400)
+                .with_headers(cors::headers()?));
+            }
+
+            let source = match db::get_by_path(&ctx, &source_path).await? {
+                Some(f) => f,
+                None => {
+                    return Ok(Response::from_json(&serde_json::json!({
+                        "error": "not_found", "message": "源文件不存在。",
+                    }))?
+                    .with_status(404)
+                    .with_headers(cors::headers()?))
+                }
+            };
+            if db::get_by_path(&ctx, &target_path).await?.is_none() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "not_found", "message": "目标文件不存在。",
+                }))?
+                .with_status(404)
+                .with_headers(cors::headers()?));
+            }
+
+            // A proxy is a playback source, so both ends have to be playable.
+            // Without this an image could be filed as the video's proxy and the
+            // clip page would offer it in the source selector.
+            if !(source.content_type.starts_with("video/") || source.content_type.starts_with("audio/")) {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "not_playable",
+                    "message": "只有视频或音频文件可以作为代理。",
+                }))?
+                .with_status(400)
+                .with_headers(cors::headers()?));
+            }
+
+            // The source's `files` row is about to disappear, and everything
+            // keyed on its path would be orphaned with nothing left to enumerate
+            // it — the same trap the delete route guards. Refuse and report,
+            // rather than silently destroying or silently migrating: the clips
+            // were authored against *that* path and moving them is a claim about
+            // the content that only the admin can make.
+            let counts = db::count_attached(&ctx, &source_path).await?;
+            if !counts.is_empty() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "source_not_empty",
+                    "clips": counts.clips,
+                    "clip_sets": counts.clip_sets,
+                    "attachments": counts.attachments,
+                    "proxies": counts.proxies,
+                    "message": "源文件本身有关联内容，请先处理后再关联。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
+            // The filename is a better default label than the full path: the
+            // picker already shows which file it was.
+            let fallback = source_path.rsplit('/').next().unwrap_or(&source_path).to_string();
+            let label = clamp_text(
+                body["label"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or(&fallback),
+                32,
+            );
+
+            db::attach_file_as_proxy(&ctx, &source, &target_path, &label).await?;
+            console_log!("Attached {} to {} as proxy", source_path, target_path);
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "attached": source_path,
+                "target": target_path,
+                "label": label,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/proxy/detach — lift a proxy back out into its own file.
+        //
+        // The undo for the route above. Without it an accidental attach could
+        // only be reversed by deleting the proxy, which throws the bytes away.
+        .post_async("/admin/api/proxy/detach", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Detach by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let key = body["key"].as_str().unwrap_or("").to_string();
+            if key.is_empty() {
+                return Ok(Response::error("Bad Request: missing key", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let proxy = match db::get_proxy_by_key(&ctx, &key).await? {
+                Some(p) => p,
+                None => {
+                    return Ok(Response::from_json(&serde_json::json!({
+                        "error": "not_found", "message": "代理不存在。",
+                    }))?
+                    .with_status(404)
+                    .with_headers(cors::headers()?))
+                }
+            };
+
+            // A proxy carries a label, not a path, so the new file needs a name.
+            // The key's last segment is the original upload filename and is the
+            // obvious default; the admin can rename afterwards, which is free.
+            let fallback = key.rsplit('/').next().unwrap_or("proxy").to_string();
+            let path = body["path"]
+                .as_str()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&fallback)
+                .to_string();
+
+            // `idx_files_path` is UNIQUE — check first so this is a 409 the UI
+            // can explain rather than a raw D1 constraint error.
+            if db::path_exists(&ctx, &path).await? {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "duplicate", "path": path,
+                    "message": "已存在同名文件，请换一个名字。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
+            db::detach_proxy_to_file(&ctx, &proxy, &path).await?;
+            console_log!("Detached proxy {} from {} as {}", key, proxy.file_path, path);
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "path": path,
+                "key": key,
+                "was_proxy_of": proxy.file_path,
             }))?
             .with_headers(cors::headers()?))
         })
@@ -1309,6 +1608,25 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 .collect();
 
             let bucket = ctx.bucket("FILE_BUCKET")?;
+
+            // The parent file can be deleted while this upload is in flight —
+            // an upload runs for minutes, the delete route runs once. Its
+            // cleanup pass has already enumerated `proxy_videos` by then, so a
+            // row inserted now names an R2 object nothing will ever list again.
+            // Abort rather than complete: that leaves no object at all, which
+            // is the only outcome with no cleanup left to owe.
+            if db::get_by_path(&ctx, &file_path).await?.is_none() {
+                let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+                let _ = upload.abort().await;
+                console_log!("Proxy complete aborted: {} no longer exists", file_path);
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "file_gone",
+                    "message": "源文件已被删除，代理上传已取消。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
             let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
             let obj = upload.complete(uploaded_parts).await?;
             let size = obj.size() as i64;
@@ -1479,6 +1797,20 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 .collect();
 
             let bucket = ctx.bucket("FILE_BUCKET")?;
+
+            // Same race as `/proxy/complete`, same reasoning — see there.
+            if db::get_by_path(&ctx, &file_path).await?.is_none() {
+                let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+                let _ = upload.abort().await;
+                console_log!("Attachment complete aborted: {} no longer exists", file_path);
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "file_gone",
+                    "message": "源文件已被删除，关联文件上传已取消。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
             let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
             let obj = upload.complete(uploaded_parts).await?;
             let size = obj.size() as i64;

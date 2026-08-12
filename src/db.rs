@@ -139,6 +139,60 @@ pub async fn rename_path(
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
 }
 
+/// Everything attached to a display path, counted for the delete confirmation.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AttachedCounts {
+    pub clips: i32,
+    pub clip_sets: i32,
+    pub attachments: i32,
+    pub proxies: i32,
+}
+
+impl AttachedCounts {
+    pub fn is_empty(&self) -> bool {
+        self.clips == 0 && self.clip_sets == 0 && self.attachments == 0 && self.proxies == 0
+    }
+}
+
+/// Count everything bound to a display path, for the delete confirmation dialog.
+///
+/// Deliberately **no `is_public` filter** on `clips`: the dialog reports how much
+/// is about to be destroyed, and private clips are destroyed exactly like public
+/// ones. Reusing `list_clips` here would have counted only the public ones and
+/// told the admin "3" while purging 40 — a confirmation that understates
+/// irreversible loss is worse than no confirmation at all. The number this
+/// returns is the same population `delete_clips_for_path` reports afterwards,
+/// which is the cheap way to check the two have not drifted.
+pub async fn count_attached(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<AttachedCounts> {
+    let db = ctx.d1("DB")?;
+    // One round trip. Four separate binds rather than `?1` reused — worker-rs
+    // binds a positional array and numbered parameters are not part of that API.
+    let row = db
+        .prepare(
+            "SELECT (SELECT COUNT(*) FROM clips WHERE file_path = ?) AS clips, \
+                    (SELECT COUNT(*) FROM clip_sets WHERE file_path = ?) AS clip_sets, \
+                    (SELECT COUNT(*) FROM file_attachments WHERE file_path = ?) AS attachments, \
+                    (SELECT COUNT(*) FROM proxy_videos WHERE file_path = ?) AS proxies",
+        )
+        .bind(&[
+            JsValue::from(&D1Type::Text(file_path)),
+            JsValue::from(&D1Type::Text(file_path)),
+            JsValue::from(&D1Type::Text(file_path)),
+            JsValue::from(&D1Type::Text(file_path)),
+        ])?
+        .first::<AttachedCounts>(None)
+        .await?;
+    Ok(row.unwrap_or(AttachedCounts {
+        clips: 0,
+        clip_sets: 0,
+        attachments: 0,
+        proxies: 0,
+    }))
+}
+
 // ── Proxy video records ──
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -246,6 +300,130 @@ pub async fn delete_proxy_by_key(
     // `run()` reports success for a DELETE that matched nothing, so check the
     // row count instead — the admin UI needs to tell "gone" from "never existed".
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}
+
+/// Make a proxy the file's own source: point the `files` row at its R2 object
+/// and stop listing it as a proxy.
+///
+/// This is how "delete the 40 GB original but keep everything built on it"
+/// works. `files.path` never moves, so clips, clip sets, attachments and the
+/// remaining proxies stay attached with no repointing at all — they all join on
+/// the path, and a proxy shares the original's timeline, so every clip's time
+/// range still means what it meant.
+///
+/// It does **not** violate key immutability (CLAUDE.md): no key's bytes change,
+/// the proxy's object is exactly what it always was. What moves is the row → key
+/// mapping. Links to the *deleted* original's key break, but that is inherent to
+/// deleting it and is equally true of a plain delete.
+///
+/// The two writes go through `batch`, which D1 runs as a transaction, so the
+/// intermediate state never exists. Keep them in this order anyway: if they are
+/// ever unwound into two calls, `UPDATE files` must land first. Deleting the
+/// proxy row first and then failing the update leaves an R2 object no table
+/// names — unenumerable, and therefore a permanent leak. The reverse failure
+/// leaves the same key in both tables, which is visible and repairable.
+pub async fn promote_proxy_to_file(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+    proxy: &ProxyRecord,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    let update = db
+        .prepare("UPDATE files SET key = ?, size = ?, content_type = ? WHERE path = ?")
+        .bind(&[
+            JsValue::from(&D1Type::Text(&proxy.key)),
+            // Real, not Integer — D1Type has no 64-bit int (see CLAUDE.md).
+            JsValue::from(&D1Type::Real(proxy.size as f64)),
+            JsValue::from(&D1Type::Text(&proxy.content_type)),
+            JsValue::from(&D1Type::Text(file_path)),
+        ])?;
+    let drop_proxy = db
+        .prepare("DELETE FROM proxy_videos WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(&proxy.key))])?;
+    db.batch(vec![update, drop_proxy]).await?;
+    Ok(())
+}
+
+/// One proxy row by its R2 key.
+pub async fn get_proxy_by_key(
+    ctx: &worker::RouteContext<()>,
+    key: &str,
+) -> Result<Option<ProxyRecord>> {
+    let db = ctx.d1("DB")?;
+    db.prepare(
+        "SELECT file_path, key, label, content_type, size, uploaded_at FROM proxy_videos WHERE key = ?",
+    )
+    .bind(&[JsValue::from(&D1Type::Text(key))])?
+    .first::<ProxyRecord>(None)
+    .await
+}
+
+/// Fold a standalone file into another file's collection as a proxy.
+///
+/// The inverse of `promote_proxy_to_file`, and the reason both exist: a
+/// "collection" here is just a `files` row plus the `proxy_videos` and
+/// `file_attachments` rows that name its path, so grouping two separately
+/// uploaded encodes is a matter of moving one row between two tables. No bytes
+/// move — the R2 object keeps the key it was minted with, which is why a 40 GB
+/// file can be regrouped instantly.
+///
+/// The caller must have checked that `source` has nothing of its own attached;
+/// its `files` row disappears here, and anything keyed on its path would be
+/// orphaned with no way left to enumerate it (same reasoning as the delete
+/// route). One `batch` so the row is never in both tables or neither.
+pub async fn attach_file_as_proxy(
+    ctx: &worker::RouteContext<()>,
+    source: &FileRecord,
+    target_path: &str,
+    label: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    let drop_file = db
+        .prepare("DELETE FROM files WHERE path = ?")
+        .bind(&[JsValue::from(&D1Type::Text(&source.path))])?;
+    let add_proxy = db
+        .prepare(
+            "INSERT INTO proxy_videos (file_path, key, label, content_type, size, uploaded_at) \
+             VALUES (?, ?, ?, ?, ?, datetime('now'))",
+        )
+        .bind(&[
+            JsValue::from(&D1Type::Text(target_path)),
+            JsValue::from(&D1Type::Text(&source.key)),
+            JsValue::from(&D1Type::Text(label)),
+            JsValue::from(&D1Type::Text(&source.content_type)),
+            JsValue::from(&D1Type::Real(source.size as f64)),
+        ])?;
+    db.batch(vec![drop_file, add_proxy]).await?;
+    Ok(())
+}
+
+/// Lift a proxy back out of a collection into a file of its own.
+///
+/// The undo for `attach_file_as_proxy` — without it, an accidental attach could
+/// only be reversed by deleting the proxy, which throws the bytes away. Again
+/// D1-only: the object keeps its key, the row changes tables.
+///
+/// `new_path` must be free; `idx_files_path` is UNIQUE and the caller checks it
+/// first so the admin gets a 409 rather than a raw constraint error.
+pub async fn detach_proxy_to_file(
+    ctx: &worker::RouteContext<()>,
+    proxy: &ProxyRecord,
+    new_path: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    let drop_proxy = db
+        .prepare("DELETE FROM proxy_videos WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(&proxy.key))])?;
+    let add_file = db
+        .prepare("INSERT INTO files (key, path, size, content_type) VALUES (?, ?, ?, ?)")
+        .bind(&[
+            JsValue::from(&D1Type::Text(&proxy.key)),
+            JsValue::from(&D1Type::Text(new_path)),
+            JsValue::from(&D1Type::Real(proxy.size as f64)),
+            JsValue::from(&D1Type::Text(&proxy.content_type)),
+        ])?;
+    db.batch(vec![drop_proxy, add_file]).await?;
+    Ok(())
 }
 
 // ── File attachment records ──

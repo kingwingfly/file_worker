@@ -343,6 +343,155 @@ half-failure leaves a retryable row rather than a phantom listing. Rename no
 longer touches R2 at all, which is the main reason the whole class of problem
 mostly went away.
 
+### Collections are not a table — they are a path and two row moves
+
+A "collection" (a master encode plus its lower-quality variants and its related
+files) already exists in the schema: it is one `files` row plus the
+`proxy_videos` and `file_attachments` rows naming its `path`. So grouping is not
+a migration, it is **one row moving between two tables**, and three routes cover
+the whole lifecycle:
+
+| direction | route | what moves |
+|---|---|---|
+| file → proxy | `POST /admin/api/files/attach` | `files` row out, `proxy_videos` row in |
+| proxy → file | `POST /admin/api/proxy/detach` | `proxy_videos` row out, `files` row in |
+| proxy → master | `DELETE …?mode=promote` | `files.key` repointed, proxy row dropped |
+
+All three are **D1-only**. The R2 object keeps the key it was minted with, so a
+40 GB file is regrouped in one round trip — and so a key's mint prefix stops
+predicting which table owns it (see the promote notes below). That is the same property that makes
+rename O(1), for the same reason, and it is why there is no `collections` table:
+adding one would rewrite the join key in `CLIP_COLUMNS`, `/api/proxy`,
+`/api/attachments`, `repoint_file_path` and four `delete_*_for_path` functions.
+Worth doing eventually — `repoint_file_path`'s own comment says the durable fix
+is keying on something immutable — but not as the price of a grouping feature.
+
+- **`attach` refuses a source that has anything of its own** (409
+  `source_not_empty` with the counts). Its `files` row disappears, so its clips,
+  sets and attachments would be orphaned with nothing left to enumerate them —
+  the same trap the delete route guards. Migrating them to the target instead
+  would be a claim that the two files hold the same content, which only the
+  admin can make.
+- **Both ends must be `video/` or `audio/`.** A proxy is a playback source; an
+  image filed as one would show up in the clip page's source selector.
+- **`detach` needs a name.** A proxy carries a label, not a path, so the new
+  `files` row takes the key's last segment by default. `idx_files_path` is
+  UNIQUE, so the route checks `path_exists` first and 409s rather than letting a
+  raw D1 constraint error surface.
+- Both are **POST with a JSON body, not path params**: `attach` takes two
+  user-controlled paths, and `matchit` allows a catch-all only as the final
+  segment, so `/admin/api/files/*source/attach/*target` cannot exist. A bad
+  pattern panics *every* route (see the routing section above).
+- The attach dialog's ids are `groupinto-*`. The upload section already owns
+  `#attach-target` / `#attach-label`, and a duplicate id points the dialog's
+  `<label for=>` at the element behind the overlay. Its confirm button keeps
+  `.btn-rename-confirm` for the styling that `#btn-overwrite` and `#btn-resume`
+  also wear, plus `.btn-groupinto-confirm` as the unambiguous hook.
+
+### Delete asks first, and can promote a proxy instead
+
+`DELETE /admin/api/files/*path` **refuses** a bare call whenever anything is
+attached, answering 409 `confirm_required` with the counts and the proxy list.
+The admin then re-sends with `?mode=promote&promote_key=…` or `?mode=purge`.
+Refusing is the safe default: a caller that predates this — or a stray `curl` —
+cannot destroy 40 clips it never knew existed. A file with nothing attached
+still deletes on the first call, so the dialog only appears when there is
+something to lose.
+
+`mode=promote` is the interesting one, and it is **not a delete**: it drops the
+original's R2 object and repoints the `files` row at a proxy's object, so the
+file survives at the same path, smaller. Everything attached joins on
+`files.path`, which does not move, and a proxy shares the original's timeline —
+so no clip, set or attachment needs repointing and every time range still means
+what it meant. That is the whole trick: it frees 40 GB and keeps the work built
+on top of it.
+
+Promotion does **not** break key immutability. No key's bytes change; what moves
+is the row → key mapping. Links to the *deleted* original's key break, but that
+is inherent to deleting it and equally true of a purge. `files.key` then holds a
+`proxies/…` key — verified safe, because nothing filters on that prefix:
+`proxy_exists`/`attachment_exists` guard by table membership, and the one R2
+lifecycle rule (abort incomplete multipart uploads) never touches committed
+objects. Keep it that way; see the prefix note below.
+
+Details that are load-bearing:
+
+- **`count_attached` has no `is_public` filter.** `list_clips` bakes
+  `is_public = 1` into all four of its WHERE branches, so reusing it would tell
+  the admin "3 个切片" while purging 40. A confirmation that understates
+  irreversible loss is worse than no confirmation. Its number is the same
+  population `delete_clips_for_path` returns afterwards — comparing them is the
+  cheap check that they have not drifted.
+- **`promote_key` is validated against *this path's* proxies**, never
+  `proxy_exists`, which is a global "is this a proxy anywhere". With the global
+  check, `?promote_key=<another file's proxy>` repoints this row at a foreign
+  object and hands the next delete of this row that file's playback source to
+  destroy. Same bug class as the guard on `DELETE /admin/api/proxy?key=`, one
+  level up.
+- **The suggestion is the biggest proxy that still has a picture**
+  (`max_by_key` on `(!audio, size)`). Biggest because it replaces the original
+  and becomes the export source — the clip page still defaults its *preview* to
+  the smallest. Picture first because promoting an audio-only proxy moves the
+  file into the gallery's 音频 filter and leaves clips with no frame to cut
+  against; it stays eligible as a last resort, and the dialog says so, since no
+  source at all is worse.
+- **`files.key` is `UNIQUE` (migration 0001)** and the promoted key survives
+  that, because a key lives in exactly one of the two tables — the batch is what
+  maintains it, so no `files` row can already hold what `proxy_videos` holds.
+  Promoting the same proxy twice fails the ownership check instead.
+
+  Do **not** reach for the mint prefixes to argue this. `attach` files an
+  `uploads/…` key into `proxy_videos` and `promote` files a `proxies/…` key into
+  `files`, so after either one the prefix no longer says which table a key is
+  in — it only records which uploader minted it. Anything that treats `proxies/`
+  as "is a proxy" (a prefix-scoped lifecycle rule, an admin listing, a cleanup
+  script) is wrong the moment a collection is rearranged. Ask the table.
+- **The two D1 writes go through `batch`**, which D1 runs as a transaction.
+  If they are ever unwound into two calls, `UPDATE files` must land first:
+  deleting the proxy row first and then failing leaves an R2 object no table
+  names — unenumerable, a permanent leak. The reverse failure leaves one key in
+  two tables, which is visible and repairable.
+- **`admin.js` keeps its `confirm()` first**, before the request. The impact is
+  only known from the server's refusal, which arrives *after* the call — so
+  discovering the impact can never be what gates the first destructive call.
+
+Deleting a file is the one route that fans out. Four tables key on `files.path`
+— `proxy_videos`, `file_attachments`, `clips`, `clip_sets` — and two of them own
+R2 objects, so `DELETE /admin/api/files/*path` deletes the source object, then
+every proxy object, then every attachment object, then the rows, and the `files`
+row **last**. That order is the retry anchor: while the `files` row exists the
+whole route can be replayed, and every step in it is idempotent.
+
+Which is why a failed proxy/attachment object delete must **not** drop its row.
+The row is the only surviving name for that key — nothing else enumerates these
+objects once `files` is gone, which is the entire reason they are deleted here —
+so `let _ = bucket.delete(k)` followed by an unconditional row delete strands the
+object in the bucket forever, the exact outcome the block exists to prevent. The
+route collects failures and returns 502 with the `files` row intact instead.
+
+A bailed run is **not** a no-op — the source object and any table that did clean
+up successfully are already gone. The surviving `files` row is a retry handle,
+not a live file, so the listing after a 502 shows something that no longer plays.
+Retry finishes the job; that is the tradeoff, and it beats a silent leak.
+
+It bails **before** `delete_clips_for_path`, not after. Clips own no R2 object,
+so deleting them is pure irreversible loss; doing it on a run that is about to be
+retried destroys the clips while the file is still listed as present.
+
+`/proxy/complete` and `/attachment/complete` re-check `get_by_path` before
+completing the multipart upload, because an upload runs for minutes and the
+delete route runs once — its cleanup already enumerated both tables, so a row
+inserted afterwards names an object nothing will ever list again. They abort the
+upload and 409, which leaves no object at all and so owes no cleanup. This is the
+same class of stale-decision bug as `/upload/complete`'s duplicate re-check.
+
+That 409 shares a status with the duplicate-name refusal, so `admin.js` branches
+on the body's `error` field. Both verdicts are deliberately **fatal**: the server
+has already aborted, so `uploadLanded()` is never consulted and no Resume banner
+appears — resuming an aborted multipart upload loops forever. A non-409 status
+here would be worse than the collision: `!ok` alone is non-fatal and lands in
+exactly that loop.
+
 ### Video codecs
 
 Uploads are a mix of H.264, HEVC and AV1 (see README for the matrix and ffmpeg
@@ -592,3 +741,11 @@ entities (`&#39;`) escape out of that regardless of quote-escaping.
 - An overwrite upload deletes the previous R2 object before inserting the new
   row. If that insert then fails, both the old bytes and the new row are gone.
   Narrow (the object is committed first), noted rather than restructured.
+- An overwrite upload leaves the old file's proxies, attachments, clips and clip
+  sets attached to the path, now pointing at different bytes. Nothing is
+  orphaned — everything is silently *mis*-attached: the old proxy is offered as
+  a playback source for the new video, and a shared clip's time range indexes
+  content nobody chose. Unfixed because both answers are defensible: an admin
+  re-uploading a corrected encode of the same video wants the clips kept, and
+  purging them is destructive and surprising in that case. Deciding needs a
+  product call, not a code change.
