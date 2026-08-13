@@ -23,6 +23,25 @@
     </div>
   </header>
 
+  <!-- Announcements. Directly under the title and above the filter bar: it is
+       the only thing on this page the admin writes, and anything below the
+       filters competes with the gallery for the first screen. Stays hidden
+       until the feed has something, so the page is unchanged with nothing to
+       say — which is why the collapse state below persists *collapsed only*. -->
+  <section class="notices" id="notices" hidden aria-label="公告">
+    <h2 class="notice-bar">
+      <button class="notice-toggle" id="notice-toggle" aria-expanded="true" aria-controls="notice-body-wrap">
+        <span class="notice-chevron" aria-hidden="true">▾</span>
+        <span>📢 公告</span>
+        <span class="notice-bar-count" id="notice-bar-count"></span>
+      </button>
+    </h2>
+    <div id="notice-body-wrap">
+      <div class="notice-list" id="notice-feed"></div>
+      <button class="notice-showall" id="notice-showall" hidden></button>
+    </div>
+  </section>
+
   <nav class="filter-bar" aria-label="筛选">
     <button class="filter-btn active" data-filter="all" aria-pressed="true">
       ✨ 全部
@@ -37,14 +56,6 @@
       🎵 音频
     </button>
   </nav>
-
-  <!-- Announcements. Above everything, including the clip rank: it is the only
-       thing on this page the admin writes directly, and a notice nobody scrolls
-       to is not a notice. Stays hidden until the feed has something, so the
-       page is unchanged when there is nothing to say. -->
-  <section class="notices" id="notices" hidden aria-label="公告">
-    <div class="notice-list" id="notice-feed"></div>
-  </section>
 
   <!-- Clip rank. Above the gallery on purpose: the gallery is a list of source
        files, this is a list of the moments people actually came for. Collapsed

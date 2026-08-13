@@ -647,6 +647,9 @@ async function runUpload(file, session) {
   dupWarning.hidden = true;
 
   uploadInProgress = true;
+  // The progress bar and the resume banner live in the upload section, so it
+  // cannot stay shut behind a collapse restored from a previous visit.
+  expandUploadSection();
   // Deliberately does NOT request a lock. runUpload is reached after the
   // check-key and /upload/start round trips, so it has no user activation
   // left and WebKit refuses — which would overwrite a lock the click
@@ -2090,6 +2093,219 @@ function showNoticeResult(ok, text) {
 // it is loaded once at startup — otherwise picking 「📢 公告附件」 offers an
 // empty dropdown until the admin happens to click 加载公告.
 loadNotices();
+
+// ── Dashboard ──
+//
+// Read-only, and the only section that is not a form: it answers "what is
+// going on" so the rest of the page can stay "change this one thing".
+let dashDays = 7;
+
+document.getElementById('dash-range').addEventListener('click', (e) => {
+  const btn = e.target.closest('.range-tab');
+  if (!btn) return;
+  for (const t of document.querySelectorAll('#dash-range .range-tab')) {
+    const on = t === btn;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', String(on));
+  }
+  dashDays = parseInt(btn.dataset.days, 10) || 7;
+  loadDashboard();
+});
+$('btn-dash-refresh').addEventListener('click', loadDashboard);
+
+async function loadDashboard() {
+  const btn = $('btn-dash-refresh');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/admin/api/dashboard?days=' + dashDays);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const d = await resp.json();
+    renderStats(d.overview || {});
+    renderDashChart(d.daily || []);
+    renderDashTop(d.top || []);
+    $('dash-updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  } catch (err) {
+    $('stat-grid').replaceChildren(mkNote('admin-error', '❌ 概览加载失败: ' + err.message));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderStats(o) {
+  // `sub` is the second line, and it is where a number that would otherwise
+  // need explaining goes — "23 个" alone does not say 23 of what is public.
+  const tiles = [
+    { icon: '▶️', label: '总播放', value: fmtCount(o.all_plays), accent: 'play' },
+    { icon: '⬇️', label: '总下载', value: fmtCount(o.all_downloads), accent: 'dl' },
+    { icon: '🎬', label: '文件', value: fmtCount(o.files), sub: formatSize(o.total_size || 0) },
+    { icon: '📹', label: '代理 / 关联', value: `${fmtCount(o.proxies)} / ${fmtCount(o.attachments)}` },
+    { icon: '✂️', label: '切片', value: fmtCount(o.clips), sub: `公开 ${fmtCount(o.public_clips)}` },
+    { icon: '📚', label: '归档', value: fmtCount(o.clip_sets) },
+    { icon: '📢', label: '公告', value: fmtCount(o.announcements), sub: `已发布 ${fmtCount(o.published_announcements)}` },
+    { icon: '🚩', label: '待处理举报', value: fmtCount(o.open_reports), accent: o.open_reports > 0 ? 'warn' : '' },
+  ];
+  $('stat-grid').replaceChildren(...tiles.map(t => {
+    const card = document.createElement('div');
+    card.className = 'stat-tile' + (t.accent ? ' accent-' + t.accent : '');
+    const icon = document.createElement('div');
+    icon.className = 'stat-icon';
+    icon.textContent = t.icon;
+    const val = document.createElement('div');
+    val.className = 'stat-value';
+    val.textContent = t.value;
+    const lab = document.createElement('div');
+    lab.className = 'stat-label';
+    lab.textContent = t.label;
+    card.append(icon, val, lab);
+    if (t.sub) {
+      const sub = document.createElement('div');
+      sub.className = 'stat-sub';
+      sub.textContent = t.sub;
+      card.append(sub);
+    }
+    return card;
+  }));
+}
+
+// A CSS bar chart, not a charting library: this page has no build step and no
+// external requests, and two series over at most 90 buckets is a flexbox.
+function renderDashChart(daily) {
+  const host = $('dash-chart');
+  if (!daily.length) {
+    host.replaceChildren(mkNote('admin-empty', '这段时间还没有播放或下载记录。'));
+    return;
+  }
+  // Scale to the tallest single bar so the shape is readable; both series share
+  // it, or "downloads" would look as big as "plays" at a tenth the count.
+  const peak = Math.max(...daily.map(d => Math.max(d.plays, d.downloads)), 1);
+  host.replaceChildren(...daily.map(d => {
+    const col = document.createElement('div');
+    col.className = 'chart-col';
+    col.title = `${d.day} · 播放 ${d.plays} · 下载 ${d.downloads}`;
+    const bars = document.createElement('div');
+    bars.className = 'chart-bars';
+    for (const [cls, v] of [['play', d.plays], ['dl', d.downloads]]) {
+      const bar = document.createElement('div');
+      bar.className = 'chart-bar ' + cls;
+      // A count of 0 keeps a hairline so the day reads as "nothing" rather
+      // than as a gap in the axis.
+      bar.style.height = (v > 0 ? Math.max(4, Math.round((v / peak) * 100)) : 1) + '%';
+      bars.append(bar);
+    }
+    const lab = document.createElement('div');
+    lab.className = 'chart-label';
+    lab.textContent = d.day.slice(5);   // MM-DD; the year is the same all the way across
+    col.append(bars, lab);
+    return col;
+  }));
+}
+
+function renderDashTop(rows) {
+  const host = $('dash-top');
+  if (!rows.length) {
+    host.replaceChildren(mkNote('admin-empty', '暂无数据。'));
+    return;
+  }
+  const peak = Math.max(...rows.map(r => r.plays + r.downloads), 1);
+  host.replaceChildren(...rows.map((r, i) => {
+    const row = document.createElement('div');
+    row.className = 'top-row';
+    const rank = document.createElement('span');
+    rank.className = 'top-rank';
+    rank.textContent = String(i + 1);
+    const body = document.createElement('div');
+    body.className = 'top-body';
+    const name = document.createElement('div');
+    name.className = 'top-name';
+    // A path is user-controlled text; textContent, like everywhere else here.
+    name.textContent = r.file_path.split('/').pop() || r.file_path;
+    name.title = r.file_path;
+    const meter = document.createElement('div');
+    meter.className = 'top-meter';
+    const fill = document.createElement('div');
+    fill.className = 'top-meter-fill';
+    fill.style.width = Math.round(((r.plays + r.downloads) / peak) * 100) + '%';
+    meter.append(fill);
+    body.append(name, meter);
+    const nums = document.createElement('span');
+    nums.className = 'top-nums';
+    nums.textContent = `▶️ ${fmtCount(r.plays)} · ⬇️ ${fmtCount(r.downloads)}`;
+    row.append(rank, body, nums);
+    return row;
+  }));
+}
+
+function fmtCount(n) {
+  const v = Number(n) || 0;
+  return v >= 10000 ? (v / 1000).toFixed(1) + 'k' : String(v);
+}
+
+loadDashboard();
+
+// ── Collapsible sections ──
+//
+// Applied from JS rather than written into `admin.html` eight times: every
+// section is `<div class="admin-section" id="sec-*"><h2>…`, so the header is
+// derivable, and a ninth section gets this for free instead of being the one
+// that silently does not.
+//
+// Only *collapsed* is persisted, and nothing collapses on its own. An
+// auto-collapse would eventually hide the upload progress bar and the resume
+// banner mid-transfer, which is the one state on this page you cannot afford
+// not to see — `expandUploadSection()` below exists for exactly that case.
+const SECTION_COLLAPSE_KEY = 'zcll.admin.collapsed';
+
+function collapsedSections() {
+  try { return new Set(JSON.parse(localStorage.getItem(SECTION_COLLAPSE_KEY) || '[]')); }
+  catch (_) { return new Set(); }
+}
+
+function setSectionCollapsed(section, collapsed) {
+  section.classList.toggle('collapsed', collapsed);
+  const btn = section.querySelector('.section-toggle');
+  if (btn) btn.setAttribute('aria-expanded', String(!collapsed));
+  const stored = collapsedSections();
+  if (collapsed) stored.add(section.id); else stored.delete(section.id);
+  try { localStorage.setItem(SECTION_COLLAPSE_KEY, JSON.stringify([...stored])); }
+  catch (_) { /* the toggle still works for this page view */ }
+}
+
+function initCollapsibleSections() {
+  const stored = collapsedSections();
+  for (const section of document.querySelectorAll('.admin-section')) {
+    const h2 = section.querySelector('h2');
+    if (!h2 || !section.id) continue;
+    // The heading becomes the control. A <button> inside the <h2> keeps the
+    // heading a heading for a screen reader while making the whole strip a real
+    // keyboard-reachable control — a click handler on a bare <h2> is neither.
+    const btn = document.createElement('button');
+    btn.className = 'section-toggle';
+    btn.type = 'button';
+    btn.setAttribute('aria-expanded', 'true');
+    const chevron = document.createElement('span');
+    chevron.className = 'section-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.textContent = '▾';
+    const label = document.createElement('span');
+    label.textContent = h2.textContent;
+    btn.append(chevron, label);
+    h2.replaceChildren(btn);
+    btn.addEventListener('click', () =>
+      setSectionCollapsed(section, !section.classList.contains('collapsed')));
+    if (stored.has(section.id)) setSectionCollapsed(section, true);
+  }
+}
+
+// Called when an upload starts. A section collapsed in a previous visit is
+// restored collapsed at load, so without this the progress bar, the wake-lock
+// hint and the resume banner would all be behind a shut header for the whole
+// transfer.
+function expandUploadSection() {
+  const sec = document.getElementById('sec-upload');
+  if (sec && sec.classList.contains('collapsed')) setSectionCollapsed(sec, false);
+}
+
+initCollapsibleSections();
 
 function $(id) { return document.getElementById(id); }
 function mkNote(cls, text) {

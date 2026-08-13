@@ -15,6 +15,9 @@ const state = {
   // Playback sources for the open preview: the original plus any proxies.
   sources: [],
   activeSource: null,
+  notices: [],
+  noticesCollapsed: false,
+  noticesExpanded: false,
 };
 
 // ── DOM Refs ──
@@ -90,6 +93,14 @@ function init() {
 
   dom.notices = document.getElementById('notices');
   dom.noticeFeed = document.getElementById('notice-feed');
+  dom.noticeToggle = document.getElementById('notice-toggle');
+  dom.noticeBarCount = document.getElementById('notice-bar-count');
+  dom.noticeShowAll = document.getElementById('notice-showall');
+  dom.noticeToggle?.addEventListener('click', () => setNoticesCollapsed(!state.noticesCollapsed));
+  dom.noticeShowAll?.addEventListener('click', () => {
+    state.noticesExpanded = !state.noticesExpanded;
+    paintNotices();
+  });
 
   // Initial load
   fetchFiles();
@@ -111,10 +122,50 @@ async function loadNotices() {
   } catch (_) { /* the gallery below is unaffected */ }
 }
 
+// How many cards the feed shows before it offers the rest. Three fits above the
+// filter bar without pushing the gallery off the first screen on a phone.
+const NOTICE_PREVIEW_COUNT = 3;
+const NOTICE_COLLAPSED_KEY = 'zcll.notices.collapsed';
+
 function renderNotices(items) {
   if (!items.length) return;
-  dom.noticeFeed.replaceChildren(...items.map(noticeCard));
+  state.notices = items;
+  // Restore *collapsed* only, never expanded. The section is hidden entirely
+  // when there is nothing to say, so "collapsed" and "empty" would otherwise be
+  // the same picture — and a viewer who shut it once would never learn there
+  // was a new announcement. The count in the bar is what keeps a shut section
+  // visibly non-empty.
+  let stored = null;
+  try { stored = localStorage.getItem(NOTICE_COLLAPSED_KEY); } catch (_) { /* private mode */ }
+  setNoticesCollapsed(stored === '1', true);
+  paintNotices();
   dom.notices.hidden = false;
+}
+
+function paintNotices() {
+  const items = state.notices;
+  const shown = state.noticesExpanded ? items : items.slice(0, NOTICE_PREVIEW_COUNT);
+  dom.noticeFeed.replaceChildren(...shown.map(noticeCard));
+  dom.noticeBarCount.textContent = items.length > 1 ? String(items.length) : '';
+
+  // The overflow reveal is deliberately a different control from the section
+  // toggle above — two nested collapses that look alike read as broken.
+  const hiddenCount = items.length - NOTICE_PREVIEW_COUNT;
+  dom.noticeShowAll.hidden = hiddenCount <= 0;
+  dom.noticeShowAll.textContent = state.noticesExpanded
+    ? '收起'
+    : `查看全部 ${items.length} 条公告`;
+}
+
+function setNoticesCollapsed(collapsed, restoring) {
+  state.noticesCollapsed = collapsed;
+  dom.notices.classList.toggle('collapsed', collapsed);
+  dom.noticeToggle.setAttribute('aria-expanded', String(!collapsed));
+  if (restoring) return;
+  try {
+    if (collapsed) localStorage.setItem(NOTICE_COLLAPSED_KEY, '1');
+    else localStorage.removeItem(NOTICE_COLLAPSED_KEY);
+  } catch (_) { /* the toggle still works for this page view */ }
 }
 
 // Every string here goes in through textContent, and the media below is only
@@ -587,6 +638,16 @@ function openPreview(file) {
   }
   if (dom.clipPanel) dom.clipPanel.hidden = true;
 
+  // One play per opened file, counted here rather than from a `play` listener
+  // on the element. `selectSource` reuses the element for video→video and
+  // replaces it for video↔audio, so an element-bound listener either fires
+  // again on a quality switch (double count) or stops firing entirely (miss) —
+  // the same staleness trap `onSourceError` documents on the clip page.
+  // Images do not count: nothing is played.
+  if (ct.startsWith('video/') || ct.startsWith('audio/')) {
+    sendMetric(displayPath(file), 'play');
+  }
+
   renderPreviewMedia(file, state.activeSource);
 
   dom.previewModal.hidden = false;
@@ -752,6 +813,24 @@ function closePreview() {
   document.body.style.overflow = '';
 }
 
+// ── Metrics ──
+// Fire-and-forget. `keepalive` so a click that navigates or closes the tab
+// still delivers it, and a swallowed failure because a lost count must never
+// be visible to a viewer. Not `sendBeacon`: this fires mid-session, and
+// `keepalive` gives the same delivery guarantee while letting the request
+// carry a Content-Type.
+function sendMetric(filePath, event) {
+  if (!filePath) return;
+  try {
+    fetch('/api/metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_path: filePath, event }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (_) { /* counting is never worth breaking playback over */ }
+}
+
 // ── Download ──
 function downloadFile(file) {
   // Follows the source picker: choosing 360p and hitting 💾 should give you the
@@ -769,6 +848,12 @@ function downloadFile(file) {
     const tag = source.label.replace(/^\S+\s*/, '').trim() || 'proxy';
     name = dot > 0 ? `${name.slice(0, dot)}-${tag}${name.slice(dot)}` : `${name}-${tag}`;
   }
+  // Counted against the *file*, not the source: downloading the 360p proxy is
+  // still a download of this video. Attachments (subtitles) and the clip
+  // exporter deliberately do not count — "下载" on the dashboard means someone
+  // took the file itself, and folding four different things into one number
+  // would make it mean nothing.
+  sendMetric(displayPath(file), 'download');
   const url = `/api/file/${encodePath(key)}?download=1&name=${encodeURIComponent(name)}`;
   const a = document.createElement('a');
   a.href = url;

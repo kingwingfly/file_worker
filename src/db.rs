@@ -966,6 +966,10 @@ pub async fn repoint_file_path(
         "UPDATE proxy_videos SET file_path = ? WHERE file_path = ?",
         "UPDATE clip_sets SET file_path = ? WHERE file_path = ?",
         "UPDATE file_attachments SET file_path = ? WHERE file_path = ?",
+        // Metrics move with the file too: a rename that left them behind would
+        // silently reset a video's play count to zero, and the orphaned rows
+        // would keep counting toward nothing.
+        "UPDATE file_metrics SET file_path = ? WHERE file_path = ?",
     ] {
         db.prepare(sql)
             .bind(&[
@@ -1544,4 +1548,154 @@ pub async fn delete_announcement_media_by_key(
         .run()
         .await?;
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}
+
+// ── Metrics ──
+
+/// Record one play or one download.
+///
+/// A single statement: the upsert adds to the day's counters, and the
+/// `WHERE EXISTS` is what keeps a public unauthenticated endpoint from minting
+/// rows for paths that name no file. (It does not stop someone from inflating a
+/// *real* file's count — see CLAUDE.md's known-unfixed list.)
+///
+/// `excluded.plays` / `excluded.downloads` carry the increment through, so the
+/// caller passes 1/0 or 0/1 and this stays one code path for both events.
+pub async fn record_metric(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+    plays: i32,
+    downloads: i32,
+) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare(
+            "INSERT INTO file_metrics (file_path, day, plays, downloads) \
+             SELECT ?, date('now'), ?, ? \
+             WHERE EXISTS (SELECT 1 FROM files WHERE path = ?) \
+             ON CONFLICT(file_path, day) DO UPDATE SET \
+               plays = plays + excluded.plays, downloads = downloads + excluded.downloads",
+        )
+        .bind(&[
+            JsValue::from(&D1Type::Text(file_path)),
+            JsValue::from(&D1Type::Integer(plays)),
+            JsValue::from(&D1Type::Integer(downloads)),
+            JsValue::from(&D1Type::Text(file_path)),
+        ])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetricDay {
+    pub day: String,
+    pub plays: i32,
+    pub downloads: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetricFile {
+    pub file_path: String,
+    pub plays: i32,
+    pub downloads: i32,
+}
+
+/// Daily totals across every file, oldest first, for the last `days` days.
+///
+/// The window is expressed as `date('now', '-N days')` rather than filtered in
+/// the Worker: the whole point of the counter table is that the database can
+/// answer this without shipping rows.
+pub async fn metrics_daily(ctx: &worker::RouteContext<()>, days: u32) -> Result<Vec<MetricDay>> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare(
+            "SELECT day, SUM(plays) AS plays, SUM(downloads) AS downloads FROM file_metrics \
+             WHERE day >= date('now', ?) GROUP BY day ORDER BY day ASC",
+        )
+        .bind(&[JsValue::from(&D1Type::Text(&format!("-{} days", days)))])?
+        .all()
+        .await?;
+    result.results::<MetricDay>()
+}
+
+/// The busiest files in the window, most-played first.
+pub async fn metrics_top(
+    ctx: &worker::RouteContext<()>,
+    days: u32,
+    limit: u32,
+) -> Result<Vec<MetricFile>> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare(
+            "SELECT file_path, SUM(plays) AS plays, SUM(downloads) AS downloads \
+             FROM file_metrics WHERE day >= date('now', ?) GROUP BY file_path \
+             ORDER BY plays DESC, downloads DESC LIMIT ?",
+        )
+        .bind(&[
+            JsValue::from(&D1Type::Text(&format!("-{} days", days))),
+            JsValue::from(&D1Type::Integer(limit as i32)),
+        ])?
+        .all()
+        .await?;
+    result.results::<MetricFile>()
+}
+
+/// Drop a file's counters. Called from the delete fan-out; owns no R2 object.
+pub async fn delete_metrics_for_path(
+    ctx: &worker::RouteContext<()>,
+    file_path: &str,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare("DELETE FROM file_metrics WHERE file_path = ?")
+        .bind(&[JsValue::from(&D1Type::Text(file_path))])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// The dashboard's headline numbers, in one round trip.
+///
+/// Same shape as `count_attached`: separate scalar subqueries rather than joins,
+/// because they count unrelated things and a join would multiply them together.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Overview {
+    pub files: i32,
+    pub total_size: f64,
+    pub proxies: i32,
+    pub attachments: i32,
+    pub clips: i32,
+    pub public_clips: i32,
+    pub clip_sets: i32,
+    pub announcements: i32,
+    pub published_announcements: i32,
+    pub open_reports: i32,
+    pub all_plays: i32,
+    pub all_downloads: i32,
+}
+
+pub async fn overview(ctx: &worker::RouteContext<()>) -> Result<Overview> {
+    let db = ctx.d1("DB")?;
+    // total_size comes back as REAL for the same reason sizes are bound as
+    // Real: the sum of a 40 GB archive overflows an i32 long before the row
+    // count does.
+    let row = db
+        .prepare(
+            "SELECT (SELECT COUNT(*) FROM files) AS files, \
+                    (SELECT COALESCE(SUM(size), 0) FROM files) AS total_size, \
+                    (SELECT COUNT(*) FROM proxy_videos) AS proxies, \
+                    (SELECT COUNT(*) FROM file_attachments) AS attachments, \
+                    (SELECT COUNT(*) FROM clips) AS clips, \
+                    (SELECT COUNT(*) FROM clips WHERE is_public = 1) AS public_clips, \
+                    (SELECT COUNT(*) FROM clip_sets) AS clip_sets, \
+                    (SELECT COUNT(*) FROM announcements) AS announcements, \
+                    (SELECT COUNT(*) FROM announcements WHERE is_published = 1) \
+                        AS published_announcements, \
+                    (SELECT COUNT(*) FROM clip_reports WHERE resolved = 0) AS open_reports, \
+                    (SELECT COALESCE(SUM(plays), 0) FROM file_metrics) AS all_plays, \
+                    (SELECT COALESCE(SUM(downloads), 0) FROM file_metrics) AS all_downloads",
+        )
+        .first::<Overview>(None)
+        .await?;
+    row.ok_or_else(|| worker::Error::RustError("overview returned no row".into()))
 }

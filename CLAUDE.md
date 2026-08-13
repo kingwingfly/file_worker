@@ -79,15 +79,18 @@ slash (clip ids, report ids, identity ids), takes `:name`.
 `cargo check` will not catch this. Neither will a unit test — there are none.
 It shows up as a 500 on every route at once.
 
-### One uploader, three modes
+### One uploader, four modes
 
 The admin upload section uploads a new file, a **proxy** (a low-quality playback
-source) or an **attachment** (a downloadable related file — subtitles, a
-transcript); `session.mode` picks the branch. Only `/start` and `/complete`
-differ — `/admin/api/upload/part` already served all three — so both attach
-modes get resume, the progress bar, the wake lock and the retry set for free.
-Proxies used to have a parallel stripped-down uploader that had none of it, and
-attachments would have grown a second one.
+source), an **attachment** (a downloadable related file — subtitles, a
+transcript) or **announcement media**; `session.mode` picks the branch. Only
+`/start` and `/complete` differ — `/admin/api/upload/part` already served all of
+them — so every attach mode gets resume, the progress bar, the wake lock and the
+retry set for free. Proxies used to have a parallel stripped-down uploader that
+had none of it, and each mode since would have grown another one.
+
+The fourth mode also made the target polymorphic — see "The uploader's fourth
+mode binds to an id, not a path" below.
 
 **Never test the mode with a bare `=== 'proxy'`.** With two modes that
 comparison doubled as "not a plain file upload"; with three it silently
@@ -114,7 +117,7 @@ Three things that must stay branched:
   enough; an attachment is downloaded, and `/api/file/{key}?download=1` has no
   way to derive a display name from a key (migration 0002).
 
-`sessionAttachPath()` / `sessionAttachLabel()` also read the pre-rename
+`sessionAttachTarget()` / `sessionAttachLabel()` also read the pre-rename
 `proxyFilePath` / `proxyLabel` fields, so an upload already in flight when this
 version ships still resumes.
 
@@ -592,6 +595,46 @@ target that is not in the file listing.
 
 ### The gallery's notice feed
 
+It sits **between the header and the filter bar**, not above the clip rank.
+Anything below the filters competes with the gallery for the first screen, and
+a notice nobody scrolls to is not a notice.
+
+Three states, not two, and the difference is what the collapse rules are for:
+
+- **hidden** — the feed is empty, so the section is `hidden` and the page looks
+  exactly as it did before this feature existed.
+- **collapsed** — the viewer shut it. Only *this* is persisted
+  (`zcll.notices.collapsed`), and re-opening **removes** the key rather than
+  storing "expanded". Persisting expanded would mean a viewer who once shut the
+  bar keeps a stale answer forever; persisting collapsed only is the state that
+  is safe to be wrong about.
+- **expanded** — the default, always, for a first-time visitor.
+
+The collapsed bar keeps the **count badge**. That is the whole reason a shut
+section is still visibly different from an empty one: without it, "collapsed"
+and "nothing to say" are the same picture and a new announcement is invisible
+to anyone who ever tapped the chevron.
+
+Long feeds show `NOTICE_PREVIEW_COUNT` (3) cards and offer the rest behind
+`查看全部 N 条`. That control is deliberately styled unlike the section toggle —
+two nested collapses that look alike read as broken — and it is not persisted,
+because it is a "show me more right now", not a preference.
+
+The admin page has the same mechanism per `.admin-section`, applied from JS
+rather than written into the markup eight times, so a ninth section gets it for
+free instead of being the one that silently does not. Two rules there:
+
+- **Nothing ever collapses itself.** The stored set only ever grows from a
+  click.
+- **An upload force-opens `#sec-upload`** (`expandUploadSection()`, called from
+  `runUpload`). A section collapsed in a previous visit is restored collapsed at
+  load, so without this the progress bar, the wake-lock hint and the resume
+  banner spend the whole transfer behind a shut header.
+
+The collapse hides `> *:not(h2)` rather than a wrapper element, because wrapping
+would move `#attach-target` and `#attach-label`, which `admin.js` binds at
+module scope.
+
 `.notices` needs `width: 100%` for the reason documented under "Page containers
 need an explicit `width: 100%`" — it is a flex item of a column `body` with
 `margin: 0 auto`, so without it the box is `fit-content`, floored by its widest
@@ -617,6 +660,84 @@ Dates are **not** parsed with `Date`. D1 writes `datetime('now')`, i.e.
 it as *local* time, so a shared timestamp would be wrong by the viewer's offset.
 `formatNoticeDate` takes the date part as text, which is the only field a notice
 actually needs.
+
+### Metrics are counters, and they are a beacon, not a side effect of serving
+
+Migration 0007 adds `file_metrics(file_path, day, plays, downloads)`, one row
+per file per UTC day, written by an upsert.
+
+**Counting does not happen in `/api/file/*key`**, and both reasons are
+independent:
+
+- That route is the Range path — dozens of requests per video playback,
+  deliberately with no D1 read at all. A write there would put a database round
+  trip on every seek.
+- It is served `public, max-age=31536000, immutable`. `?download=1` is its own
+  cache key, so a download the browser or the edge answers from cache never
+  reaches the Worker to be counted. Server-side counting would silently
+  undercount exactly the popular files.
+
+So `POST /api/metrics` is a fire-and-forget beacon from the page. Three things
+about it:
+
+- **The body is read with `req.text()` + `serde_json::from_str`, never
+  `req.json()`.** `navigator.sendBeacon` cannot set a Content-Type, and a
+  handler that insists on `application/json` drops every beacon sent that way.
+  The client uses `fetch(..., {keepalive: true})` — same delivery guarantee,
+  and it can set the header — but the route must not depend on that.
+- **Unknown events and unknown paths answer `{"ok": false}`, not 4xx.** Nothing
+  reads the response; an error status would only produce console noise on a
+  page where counting is not the point.
+- **`record_metric`'s `WHERE EXISTS` is the only thing keeping the table
+  clean.** A public endpoint that inserted whatever path it was handed would let
+  anyone mint unbounded rows.
+
+**One play per opened file**, counted where the file is opened (`openPreview`,
+and `init` on the clip page) rather than from a `play` listener on the element.
+`selectSource`/`switchSource` reuse the media element for video→video and
+replace it for video↔audio, so an element-bound listener either fires again on
+a quality switch (double count) or stops firing entirely (miss) — the same
+staleness trap `onSourceError` documents, with the same two causes.
+
+**"Download" means the file itself** — the gallery's 💾 and the clip page's
+full-file download, counted against `files.path` even when the bytes come from
+a proxy, because downloading the 360p is still downloading this video.
+Attachments and the clip exporter deliberately do not count; folding four
+different acts into one number makes it unreadable. The dashboard says so on
+screen, which is the only reason the number means anything.
+
+Metrics key on `file_path`, so they are in `repoint_file_path` — a rename that
+left them behind would reset a video's history to zero *and* leave orphan rows
+counting toward nothing. In the delete fan-out they sit on the **same side of
+the bail as the clips**: they own no R2 object, so dropping them is pure
+irreversible loss and must not happen on a run that is about to be retried.
+
+They are deliberately **not** in `count_attached`. That number is the "this is
+what you are about to destroy" confirmation and it lists user content; a view
+counter is not something the admin is being asked to weigh.
+
+Days are UTC buckets (`date('now')`), because that is the only clock D1 has,
+and the dashboard labels them as UTC rather than pretending otherwise.
+
+### The admin dashboard
+
+`GET /admin/api/dashboard?days=` returns the tiles, the daily series and the
+busiest files in one response — three queries the admin always wants together,
+where three round trips would be three spinners. `days` is clamped 1–365.
+
+The chart is CSS, not a charting library: this project has no build step and
+the artifact ships no external requests, and two series over at most 90 buckets
+is a flexbox. It scrolls inside its own `overflow-x: auto` box — 90 columns has
+a min-content far past a phone, and the page must not scroll sideways.
+
+Both series share one scale (the tallest single bar). Scaling them
+independently would draw downloads as tall as plays at a tenth the count, which
+is the one thing a two-series chart must not do.
+
+`overview()` uses scalar subqueries rather than joins for the same reason
+`count_attached` does: they count unrelated things, and a join would multiply
+them together. `total_size` comes back REAL — the sum of a 40 GB archive
+overflows an i32 long before the row count does.
 
 ### Video codecs
 
@@ -867,6 +988,13 @@ entities (`&#39;`) escape out of that regardless of quote-escaping.
 - An overwrite upload deletes the previous R2 object before inserting the new
   row. If that insert then fails, both the old bytes and the new row are gone.
   Narrow (the object is committed first), noted rather than restructured.
+- `POST /api/metrics` is public and unauthenticated, so anyone can inflate a
+  real file's play or download count by replaying it. The `WHERE EXISTS` guard
+  only stops rows being minted for paths that name no file. Unfixed on purpose:
+  the number steers an admin's attention, nothing else reads it, and every
+  cheap defence (an identity cookie, a per-IP cap) is either trivially
+  sidestepped or costs a D1 read on a path whose whole point is to be free.
+  If it ever matters, the fix is a rate limit at the edge, not in this Worker.
 - An overwrite upload leaves the old file's proxies, attachments, clips and clip
   sets attached to the path, now pointing at different bytes. Nothing is
   orphaned — everything is silently *mis*-attached: the old proxy is offered as

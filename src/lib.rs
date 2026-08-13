@@ -1316,6 +1316,10 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             }
 
             let clips_deleted = db::delete_clips_for_path(&ctx, &path).await?;
+            // Same side of the bail as the clips, and for the same reason: this
+            // owns no R2 object, so deleting it is pure irreversible loss and
+            // must not happen on a run that is about to be retried.
+            db::delete_metrics_for_path(&ctx, &path).await?;
 
             db::delete_by_path(&ctx, &path).await?;
 
@@ -2091,6 +2095,75 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             Ok(Response::from_json(&serde_json::json!({
                 "ok": true,
                 "deleted": count,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // === Metrics ===
+        // POST /api/metrics — a play or a download happened (public beacon)
+        //
+        // A beacon rather than counting inside `/api/file/*key`, for two
+        // independent reasons. That route is the Range path — dozens of requests
+        // per video playback, deliberately with no D1 read at all — and it is
+        // served `immutable` for a year, so a `?download=1` hit that the browser
+        // or the edge answers from cache never reaches the Worker to be counted.
+        //
+        // The body is read as text and parsed here rather than through
+        // `req.json()`: `navigator.sendBeacon` cannot set a Content-Type, and a
+        // handler that insists on `application/json` would silently drop every
+        // beacon sent that way.
+        .post_async("/api/metrics", |mut req, ctx| async move {
+            let raw = req.text().await.unwrap_or_default();
+            let body: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            let file_path = body["file_path"].as_str().unwrap_or("").trim().to_string();
+            let event = body["event"].as_str().unwrap_or("");
+
+            let (plays, downloads) = match event {
+                "play" => (1, 0),
+                "download" => (0, 1),
+                // Unknown events are dropped rather than 400'd: this is
+                // fire-and-forget from the page, nothing reads the response, and
+                // an error status here would only show up as console noise.
+                _ => (0, 0),
+            };
+
+            if file_path.is_empty() || (plays == 0 && downloads == 0) {
+                return Ok(Response::from_json(&serde_json::json!({"ok": false}))?
+                    .with_headers(cors::headers()?));
+            }
+
+            // `record_metric`'s WHERE EXISTS is what keeps this from minting rows
+            // for paths that name no file. It cannot stop someone inflating a
+            // real file's count — documented as known-unfixed.
+            let counted = db::record_metric(&ctx, &file_path, plays, downloads).await?;
+            Ok(Response::from_json(&serde_json::json!({"ok": counted}))?
+                .with_headers(cors::headers()?))
+        })
+        // GET /admin/api/dashboard?days= — everything the overview renders
+        //
+        // One request for the whole panel: the tiles, the daily series and the
+        // busiest files are three queries the admin always wants together, and
+        // three round trips would just be three spinners.
+        .get_async("/admin/api/dashboard", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let days: u32 = qs
+                .get("days")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30)
+                .clamp(1, 365);
+
+            let overview = db::overview(&ctx).await?;
+            let daily = db::metrics_daily(&ctx, days).await?;
+            let top = db::metrics_top(&ctx, days, 10).await?;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "overview": overview,
+                "daily": daily,
+                "top": top,
+                "days": days,
             }))?
             .with_headers(cors::headers()?))
         })

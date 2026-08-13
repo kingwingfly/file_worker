@@ -650,3 +650,149 @@
   overflow: hidden;
   margin: 0.2rem 0;
 }
+
+/* ── Collapsible sections ── */
+/* The heading keeps its own `margin-bottom` while open — that gap is what
+   separates it from the section body — and gives it up when there is no body
+   under it. */
+.admin-section.collapsed h2 { margin-bottom: 0; }
+
+.section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.section-chevron {
+  font-size: 0.75rem;
+  color: var(--text-light);
+  transition: transform var(--transition);
+}
+.admin-section.collapsed .section-chevron { transform: rotate(-90deg); }
+
+/* Everything but the heading. `> *` rather than a wrapper element, because the
+   sections were already written as a flat list of children and wrapping them
+   would move `#attach-target` and `#attach-label`, which admin.js binds at
+   module scope. */
+.admin-section.collapsed > *:not(h2) { display: none; }
+.admin-section.collapsed { padding-bottom: 0.9rem; }
+
+/* ── Dashboard ── */
+.range-tabs { display: flex; gap: 0.3rem; }
+.range-tab {
+  border: 1px solid var(--border-strong);
+  background: var(--white);
+  color: var(--text-light);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  font-family: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.range-tab.active { background: var(--pink); border-color: var(--pink); color: var(--white); }
+
+/* auto-fit rather than a fixed column count: eight tiles land as 4×2 on a
+   monitor and 2×4 on a phone with no breakpoint of their own. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.7rem;
+  margin-bottom: 1.2rem;
+}
+
+.stat-tile {
+  background: var(--muted-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 0.85rem;
+  border-left: 3px solid var(--border-strong);
+}
+.stat-tile.accent-play { border-left-color: var(--pink); }
+.stat-tile.accent-dl { border-left-color: var(--blue); }
+.stat-tile.accent-warn { border-left-color: var(--danger); background: var(--danger-bg); }
+
+.stat-icon { font-size: 1rem; line-height: 1; }
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-top: 0.2rem;
+  /* Tabular figures so a column of counts lines up as it changes. */
+  font-variant-numeric: tabular-nums;
+}
+.stat-label { font-size: 0.78rem; color: var(--text-light); }
+.stat-sub { font-size: 0.72rem; color: var(--text-light); margin-top: 0.15rem; }
+
+.dash-panels { display: grid; grid-template-columns: 1fr; gap: 1rem; }
+@media (min-width: 900px) {
+  .dash-panels { grid-template-columns: 1.3fr 1fr; }
+}
+
+.dash-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.85rem;
+  /* The chart scrolls inside its own box on a phone rather than widening the
+     page — 90 columns has a min-content far past 390px. */
+  min-width: 0;
+}
+.dash-panel-title { font-size: 0.9rem; font-weight: 700; margin-bottom: 0.6rem; }
+.dash-note { font-size: 0.7rem; color: var(--text-light); font-weight: 400; }
+.dash-legend { margin-top: 0.9rem; }
+
+.dash-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 150px;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+.chart-col { flex: 1 0 18px; display: flex; flex-direction: column; height: 100%; }
+.chart-bars { flex: 1; display: flex; align-items: flex-end; gap: 2px; }
+.chart-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 1px; }
+.chart-bar.play { background: var(--pink); }
+.chart-bar.dl { background: var(--blue); }
+.chart-label {
+  font-size: 0.6rem;
+  color: var(--text-light);
+  text-align: center;
+  margin-top: 0.25rem;
+  white-space: nowrap;
+}
+
+.top-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0; }
+.top-row + .top-row { border-top: 1px solid var(--border); }
+.top-rank {
+  flex: 0 0 1.5rem;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-light);
+}
+.top-body { flex: 1; min-width: 0; }
+.top-name {
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.top-meter { height: 4px; background: var(--muted-bg); border-radius: 2px; margin-top: 0.3rem; }
+.top-meter-fill { height: 100%; background: var(--pink); border-radius: 2px; }
+.top-nums {
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  color: var(--text-light);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

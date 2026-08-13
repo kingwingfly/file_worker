@@ -69,6 +69,11 @@ async function init() {
   el.filename.title = filePath;
 
   fileIsAudio = isAudio = (fileType === 'audio');
+  // One play per page load, like the gallery's one per opened preview — and
+  // for the same reason: `switchSource` replaces the media element on an
+  // audio↔video switch and reuses it otherwise, so an element-bound listener
+  // would either miss or double-count exactly the sources it matters for.
+  sendMetric(filePath, 'play');
   loadLocalData();
   setupEvents();
   loadProxies();
@@ -1188,7 +1193,24 @@ function copyExportCmd() {
     const btn = $('btn-copy-cmd'); btn.textContent = '✅ 已复制!'; setTimeout(() => { btn.textContent = '📋 复制命令'; }, 2000);
   }).catch(() => alert('复制失败，请手动选择并复制。'));
 }
+// Fire-and-forget, mirroring app.js. Duplicated rather than shared: the two
+// pages load no common script beyond mp4clip/codecs, and adding a third for
+// four lines would cost an extra request on both.
+function sendMetric(path, event) {
+  if (!path) return;
+  try {
+    fetch('/api/metrics', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_path: path, event }), keepalive: true,
+    }).catch(() => {});
+  } catch (_) { /* counting never breaks the page */ }
+}
+
 function downloadFullFile() {
+  // The whole file, so it counts. The clip exporter below deliberately does
+  // not: it fetches byte ranges to build a new file, which is not the same act
+  // as taking this one, and merging them would make 下载 unreadable.
+  sendMetric(filePath, 'download');
   const name = filePath.split('/').pop() || 'download';
   const a = document.createElement('a'); a.href = '/api/file/'+encodePath(fileKey)+'?download=1&name='+encodeURIComponent(name); a.download = name; a.style.display = 'none';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);

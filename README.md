@@ -100,6 +100,7 @@ npx wrangler deploy
 | GET | `/api/proxy?file_path=` | List proxy videos for a file (feeds the gallery's source picker) |
 | GET | `/api/attachments?file_path=` | List a file's related files (subtitles, transcripts) |
 | GET | `/api/announcements?offset=&limit=` | Published announcements, pinned first, each with its media nested |
+| POST | `/api/metrics` | Fire-and-forget beacon `{file_path, event: play\|download}` (counts nothing for an unknown path) |
 | GET | `/api/skill` | The clip-writing skill (`SKILL.md`); `?download=1` attaches it |
 | POST | `/api/identity` | Issue signed identity cookie `{nickname}` |
 | GET | `/api/identity/me` | Return current identity or null |
@@ -136,6 +137,7 @@ npx wrangler deploy
 | POST | `/admin/api/attachment/complete` | Finish attachment upload + D1 insert (409s if the file was deleted meanwhile) |
 | GET | `/admin/api/attachment?file_path=` | List attachments for a file (admin) |
 | DELETE | `/admin/api/attachment?key=` | Delete an attachment by R2 key |
+| GET | `/admin/api/dashboard?days=` | Overview tiles + daily play/download series + busiest files (days clamped 1–365) |
 | GET | `/admin/api/announcements` | List announcements, drafts included |
 | POST | `/admin/api/announcements` | Create `{title, body, pinned, is_published}` → `{id}` (draft by default) |
 | POST | `/admin/api/announcements/{id}` | Edit text (`title`/`body`) or flip flags (`pinned`/`is_published`) — send only what you own |
@@ -220,12 +222,14 @@ A resume after a page reload needs the same file re-selected from disk: a `File`
 handle cannot be persisted, and resuming with a different file would splice
 foreign bytes into the object. Name, size and last-modified must all match.
 
-The upload section has three modes. **普通文件** uploads a new object; **代理**
+The upload section has four modes. **普通文件** uploads a new object; **代理**
 attaches a low-quality playback source (360p, audio-only, …) to a file that
 already exists, picked from a dropdown; **关联文件** attaches a downloadable
-related file (subtitles, a transcript) the same way. All three run through the
-same uploader, so both attach modes get resume, progress and the wake lock too.
-The 代理与关联文件 section lists and deletes both; it no longer uploads them.
+related file (subtitles, a transcript) the same way; **公告附件** attaches an
+image, video or PDF to an announcement, picked from the same dropdown. All four
+run through the same uploader, so every attach mode gets resume, progress and
+the wake lock too. The 代理与关联文件 section lists and deletes the first two;
+the 公告 section lists and deletes the third. None of them upload.
 
 **Set an R2 lifecycle rule to abort incomplete multipart uploads** (7 days is
 reasonable) in the bucket's dashboard settings. *放弃并清理* aborts the one

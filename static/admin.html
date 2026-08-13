@@ -25,6 +25,7 @@
     </div>
 
     <nav class="admin-nav" aria-label="分区">
+      <a href="#sec-dash">📊 概览</a>
       <a href="#sec-upload">🍰 上传</a>
       <a href="#sec-notice">📢 公告</a>
       <a href="#sec-files">📋 文件</a>
@@ -34,6 +35,36 @@
       <a href="#sec-reports">🚩 举报</a>
       <a href="#sec-batch">🗑 批量</a>
     </nav>
+
+    <!-- Dashboard overview. First section on the page: it is the only one that
+         answers "what is going on" rather than "let me change something", and
+         it is one request (`/admin/api/dashboard`) for all three panels. -->
+    <div class="admin-section" id="sec-dash">
+      <h2>📊 概览</h2>
+      <div class="admin-toolbar">
+        <div class="range-tabs" id="dash-range" role="tablist">
+          <button class="range-tab active" data-days="7" role="tab" aria-selected="true">7 天</button>
+          <button class="range-tab" data-days="30" role="tab" aria-selected="false">30 天</button>
+          <button class="range-tab" data-days="90" role="tab" aria-selected="false">90 天</button>
+        </div>
+        <button class="btn-file-action" id="btn-dash-refresh">🔄 刷新</button>
+        <span class="admin-count" id="dash-updated"></span>
+      </div>
+
+      <div class="stat-grid" id="stat-grid"></div>
+
+      <div class="dash-panels">
+        <div class="dash-panel">
+          <h3 class="dash-panel-title">📈 每日播放 / 下载 <span class="dash-note">按 UTC 日期</span></h3>
+          <div class="dash-chart" id="dash-chart"></div>
+        </div>
+        <div class="dash-panel">
+          <h3 class="dash-panel-title">🔥 热门文件</h3>
+          <div id="dash-top"></div>
+        </div>
+      </div>
+      <p class="admin-note dash-legend">「播放」= 画廊预览或切片页打开一次；「下载」= 下载原片或代理。关联文件与切片导出不计入。</p>
+    </div>
 
     <!-- Upload Section -->
     <div class="admin-section" id="sec-upload">
