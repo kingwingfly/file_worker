@@ -1195,6 +1195,14 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             // reports the impact instead of guessing. Refusing is the safe
             // default: a caller that predates this (or a stray curl) cannot
             // silently destroy clips it never knew about.
+            //
+            // A mode-less DELETE is a **query**, never an action — it answers
+            // 409 with the plan whether anything is attached or not, and touches
+            // nothing either way. That is what lets the admin UI ask the server
+            // *before* it warns, so the warning and the choice arrive in one
+            // dialog whose button is the only destructive step (see the delete
+            // section in CLAUDE.md). It also means no bare `curl -X DELETE` can
+            // destroy a file, attached content or not.
             let url = req.url()?;
             let qs: std::collections::HashMap<String, String> =
                 url.query_pairs().into_owned().collect();
@@ -1216,7 +1224,11 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 .iter()
                 .max_by_key(|p| (!p.content_type.starts_with("audio/"), p.size));
 
-            if mode.is_empty() && !counts.is_empty() {
+            if mode.is_empty() {
+                // 409 with the same `confirm_required` verdict in both cases,
+                // only the message differs. Answering 200 for an unattached file
+                // would make `resp.ok` stop meaning "deleted" — a stray curl
+                // would read success off a call that did nothing.
                 return Ok(Response::from_json(&serde_json::json!({
                     "error": "confirm_required",
                     "path": path,
@@ -1225,7 +1237,11 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                     "attachments": counts.attachments,
                     "proxies": proxies,
                     "suggested_key": suggested.map(|p| p.key.clone()),
-                    "message": "该文件有关联内容，请选择处理方式。",
+                    "message": if counts.is_empty() {
+                        "该文件没有关联内容，确认后将直接删除。"
+                    } else {
+                        "该文件有关联内容，请选择处理方式。"
+                    },
                 }))?
                 .with_status(409)
                 .with_headers(cors::headers()?));
@@ -1281,7 +1297,9 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 .with_headers(cors::headers()?));
             }
 
-            if !mode.is_empty() && mode != "purge" {
+            // Everything below this line destroys something, and the only way
+            // past it is an explicit mode — the empty case returned above.
+            if mode != "purge" {
                 return Ok(Response::error("Bad Request: unknown mode", 400)?
                     .with_headers(cors::headers()?));
             }

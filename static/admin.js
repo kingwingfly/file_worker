@@ -1545,7 +1545,7 @@ function renderFileList(files) {
     const delBtn = document.createElement('button');
     delBtn.className = 'btn-file-action danger';
     delBtn.textContent = '🗑 删除';
-    delBtn.addEventListener('click', () => deleteFile(path));
+    delBtn.addEventListener('click', () => deleteFile(path, delBtn));
 
     actions.append(renameBtn);
     // Only playable files can become a proxy — a proxy is a playback source,
@@ -1598,27 +1598,38 @@ async function errorMessage(resp) {
 }
 
 // Deleting a file is never just one row: clips, clip sets, attachments and
-// proxies all hang off `files.path`. The server refuses a bare DELETE whenever
-// any of them exist and answers 409 `confirm_required` with the counts, so this
-// runs in two round trips — ask, then act on the admin's choice. A file with
-// nothing attached (the common case) still deletes on the first call, so the
-// dialog only ever appears when there is something to lose.
-async function deleteFile(path) {
-  // This confirm stays, and stays *first*. The impact is only known from the
-  // server's refusal, which arrives after the request — so discovering the
-  // impact cannot be what gates the first destructive call. A bare file (the
-  // common case) is deleted by that call, exactly as before.
-  if (!confirm(`确认删除 "${path}"?`)) return;
+// proxies all hang off `files.path`. So this asks the server first and warns
+// second — a mode-less DELETE deletes nothing and only reports the impact, and
+// the dialog it feeds is the *last* thing the admin sees. One box, naming
+// exactly what is about to be lost, and its button is the destructive call.
+//
+// There is deliberately no `confirm()` anywhere in this flow. There used to be
+// one before the request, back when a mode-less DELETE destroyed an unattached
+// file — the impact was only known from the refusal, which arrived too late to
+// gate that call. It is safe to drop precisely because that call no longer
+// destroys anything; and a native confirm that says less than the dialog behind
+// it is not a safeguard, it is the second box the admin was complaining about.
+async function deleteFile(path, btn) {
+  // The probe is a round trip where an unattached file used to get an instant
+  // native dialog, so the button says so — otherwise a slow answer reads as a
+  // dead click and the second click fires a second probe.
+  const original = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ ...'; }
   let plan;
   try {
     const resp = await fetch(`/admin/api/files/${encodePath(path)}`, { method: 'DELETE' });
-    if (resp.ok) { loadFiles(); return; }
+    // 409 is the only expected answer: the query never succeeds, because it
+    // never does anything. A 200 here would mean the server deleted the file
+    // without being told which way — refresh and say so rather than pretend.
+    if (resp.ok) { alert('服务器直接删除了该文件（未经确认）。'); loadFiles(); return; }
     if (resp.status !== 409) { alert('删除失败: ' + await errorMessage(resp)); return; }
     plan = await resp.json();
     if (plan.error !== 'confirm_required') { alert('删除失败: ' + (plan.message || '')); return; }
   } catch (err) {
     alert('网络错误: ' + err.message);
     return;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = original; }
   }
   showDeletePlan(path, plan);
 }
@@ -1649,19 +1660,27 @@ function showDeletePlan(path, plan) {
   overlay.querySelector('.rename-oldpath').textContent = path;
 
   const impact = overlay.querySelector('.delete-impact');
+  const promoteBox = overlay.querySelector('.delete-promote');
+  const promoteBtn = overlay.querySelector('.btn-delete-promote');
+  const purgeBtn = overlay.querySelector('.btn-delete-purge');
+  const select = overlay.querySelector('#promote-select');
+  const hint = overlay.querySelector('#promote-hint');
+
   const lost = [];
   if (plan.clips) lost.push(`${plan.clips} 个切片`);
   if (plan.clip_sets) lost.push(`${plan.clip_sets} 个切片合集`);
   if (plan.attachments) lost.push(`${plan.attachments} 个关联文件`);
   if (proxies.length) lost.push(`${proxies.length} 个代理`);
+
   const line = document.createElement('p');
-  line.textContent = '该文件关联了 ' + (lost.join('、') || '内容') + '。';
+  line.textContent = lost.length
+    ? '该文件关联了 ' + lost.join('、') + '。'
+    : '该文件没有关联内容。';
   impact.appendChild(line);
 
-  const promoteBox = overlay.querySelector('.delete-promote');
-  const promoteBtn = overlay.querySelector('.btn-delete-promote');
-  const select = overlay.querySelector('#promote-select');
-  const hint = overlay.querySelector('#promote-hint');
+  // 全部删除 is the wrong promise when there is nothing else to delete — this
+  // dialog now stands alone, so its button has to say exactly what it does.
+  if (!lost.length) purgeBtn.textContent = '删除文件';
 
   if (proxies.length) {
     // Biggest-with-a-picture is the server's suggestion and it is preselected,
@@ -1690,15 +1709,27 @@ function showDeletePlan(path, plan) {
   } else {
     const warn = document.createElement('p');
     warn.className = 'delete-warn';
-    warn.textContent = '没有代理可以接替原片，以上内容将一并永久删除，无法恢复。';
+    warn.textContent = lost.length
+      ? '没有代理可以接替原片，以上内容将一并永久删除，无法恢复。'
+      : '删除后无法恢复。';
     impact.appendChild(warn);
   }
 
   document.body.appendChild(overlay);
 
-  const purgeBtn = overlay.querySelector('.btn-delete-purge');
   const cancelBtn = overlay.querySelector('.btn-rename-cancel');
-  const close = () => overlay.remove();
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+
+  // Escape closes, and that is the whole keyboard surface. The rename dialog
+  // binds Enter to its confirm button; the equivalent here purges a file and
+  // everything hanging off it, so a stray Enter must do nothing. Focus starts
+  // on 取消 for the same reason — this dialog is the only gate there is.
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('keydown', onKey);
+  cancelBtn.focus();
 
   async function send(query, busyLabel, btn) {
     const original = btn.textContent;
@@ -1730,10 +1761,7 @@ function showDeletePlan(path, plan) {
 
   promoteBtn.addEventListener('click', () =>
     send('mode=promote&promote_key=' + encodeURIComponent(select.value), '⏳ ...', promoteBtn));
-  purgeBtn.addEventListener('click', () => {
-    if (!confirm(`确认永久删除 "${path}" 及其全部关联内容？`)) return;
-    send('mode=purge', '⏳ ...', purgeBtn);
-  });
+  purgeBtn.addEventListener('click', () => send('mode=purge', '⏳ ...', purgeBtn));
   cancelBtn.addEventListener('click', close);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 }

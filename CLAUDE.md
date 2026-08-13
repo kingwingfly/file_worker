@@ -415,13 +415,40 @@ is keying on something immutable — but not as the price of a grouping feature.
 
 ### Delete asks first, and can promote a proxy instead
 
-`DELETE /admin/api/files/*path` **refuses** a bare call whenever anything is
-attached, answering 409 `confirm_required` with the counts and the proxy list.
-The admin then re-sends with `?mode=promote&promote_key=…` or `?mode=purge`.
-Refusing is the safe default: a caller that predates this — or a stray `curl` —
-cannot destroy 40 clips it never knew existed. A file with nothing attached
-still deletes on the first call, so the dialog only appears when there is
-something to lose.
+**A mode-less `DELETE /admin/api/files/*path` is a query, not an action.** It
+always answers 409 `confirm_required` — with the counts, the proxy list and the
+suggested successor — and touches nothing, whether anything is attached or not.
+Only `?mode=purge` or `?mode=promote&promote_key=…` destroys. So no bare `curl
+-X DELETE` can delete a file at all, and a caller that predates this fails safe
+instead of destroying 40 clips it never knew existed.
+
+It answers **409 even when nothing is attached**, varying only `message`. A 200
+there would make `resp.ok` stop meaning "deleted", so the stray curl above would
+read success off a call that did nothing.
+
+That is what lets the admin UI **ask before it warns**: `deleteFile()` sends the
+query, then shows one dialog carrying both the impact and the choice, and the
+button inside it is the destructive call. There is **no `confirm()` anywhere in
+this flow** — not before the request, not on the purge button.
+
+The earlier design had the native confirm *first*, and that was correct then:
+the mode-less call deleted an unattached file, so the impact — known only from
+the refusal — arrived too late to gate it. Removing the confirm is safe only
+because that call is now inert. Do not reintroduce it: two boxes for one
+decision is what this replaced, and the second box said strictly *less* than the
+dialog behind it.
+
+Consequences in `admin.js`:
+
+- **The dialog's purge button reads 删除文件 when nothing is attached**, 全部删除
+  when something is. It is the only thing the admin confirms, so it cannot
+  promise to delete things that do not exist.
+- **Escape closes; Enter is not bound.** The rename dialog binds Enter to its
+  confirm — the equivalent here purges a file and everything on it. Focus opens
+  on 取消 for the same reason.
+- **The row's 🗑 button goes busy during the query.** It replaced an instant
+  native dialog with a round trip; without the busy state a slow answer reads as
+  a dead click and the second click fires a second query.
 
 `mode=promote` is the interesting one, and it is **not a delete**: it drops the
 original's R2 object and repoints the `files` row at a proxy's object, so the
@@ -476,9 +503,9 @@ Details that are load-bearing:
   deleting the proxy row first and then failing leaves an R2 object no table
   names — unenumerable, a permanent leak. The reverse failure leaves one key in
   two tables, which is visible and repairable.
-- **`admin.js` keeps its `confirm()` first**, before the request. The impact is
-  only known from the server's refusal, which arrives *after* the call — so
-  discovering the impact can never be what gates the first destructive call.
+- **`admin.js` gates on the dialog, not on a `confirm()`.** The impact is only
+  known from the server's answer, which is why the query has to be inert — see
+  the top of this section for why that inverted the old ordering.
 
 Deleting a file is the one route that fans out. Four tables key on `files.path`
 — `proxy_videos`, `file_attachments`, `clips`, `clip_sets` — and two of them own

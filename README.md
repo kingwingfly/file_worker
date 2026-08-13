@@ -128,7 +128,7 @@ npx wrangler deploy
 | POST | `/admin/api/files/rename` | Rename — one D1 `UPDATE`, no R2 work |
 | POST | `/admin/api/files/attach` | Fold a file into another file's collection as a proxy (D1 only) |
 | POST | `/admin/api/proxy/detach` | Lift a proxy back out into its own file (D1 only) |
-| DELETE | `/admin/api/files/{path}` | Delete. 409s with the impact unless `?mode=purge` or `?mode=promote&promote_key=` |
+| DELETE | `/admin/api/files/{path}` | Delete. Without a mode it deletes nothing and always 409s with the impact; `?mode=purge` or `?mode=promote&promote_key=` acts |
 | POST | `/admin/api/proxy/start` | Start proxy upload `{file_path, filename, label}` |
 | POST | `/admin/api/proxy/complete` | Finish proxy upload + D1 insert (409s if the file was deleted meanwhile) |
 | GET | `/admin/api/proxy?file_path=` | List proxies for a file (admin) |
