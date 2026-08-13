@@ -214,17 +214,34 @@ The consequence is that after a rename the R2 dashboard still shows the original
 object name. That is the trade for renames that cost the same whether the file is
 4 KB or 40 GB.
 
+### The upload queue
+
+Uploads are **detached tasks**, not a mode of the page. Picking files and
+clicking *🚀 加入上传队列* hands them to the queue and clears the form, so the
+next batch can be picked — in another mode, against another target — while the
+first is still transferring. The picker takes several files at once (all modes
+but 🖼 封面, where one cover per file makes a multi-select meaningless).
+
+Each row carries its own progress bar and its own controls: *⏸ 暂停*,
+*▶ 继续*, *取消*. **同时上传** in the queue toolbar sets how many run at once
+— default 2, maximum 4. The cap is not arbitrary: parallel parts divide the
+same upstream, and Cloudflare's edge drops a request body that arrives too
+slowly, so four at once puts each 8 MB part in the timing envelope a 32 MB part
+would have had.
+
 ### Resumable uploads
 
 A dropped part is retried in place (4 attempts, 1s/2s/4s backoff). If it still
 fails, the multipart upload is **left open** rather than aborted, and the part
 etags stay in `localStorage` — so a 40 GB transfer that dies at 90% resumes from
-90% instead of from zero. The admin page shows a banner offering *继续上传* or
-*放弃并清理*.
+90% instead of from zero. The row then offers *▶ 继续* or *放弃并清理*.
 
 A resume after a page reload needs the same file re-selected from disk: a `File`
 handle cannot be persisted, and resuming with a different file would splice
-foreign bytes into the object. Name, size and last-modified must all match.
+foreign bytes into the object. Name, size and last-modified must all match. Such
+a session comes back as a queue row in the *📂 待重新选择文件* state, with its
+own picker — one file can match two abandoned attempts, so the row you click is
+the one that gets it.
 
 The upload section has five modes. **普通文件** uploads a new object; **代理**
 attaches a low-quality playback source (360p, audio-only, …) to a file that
@@ -232,14 +249,14 @@ already exists, picked from a dropdown; **关联文件** attaches a downloadable
 related file (subtitles, a transcript) the same way; **公告附件** attaches an
 image, video or PDF to an announcement, picked from the same dropdown; **🖼 封面**
 sets a file's gallery cover. All five run through the same uploader, so every
-attach mode gets resume, progress and the wake lock too. A cover can also be
+attach mode gets the queue, resume, progress and the wake lock too. A cover can also be
 picked from the file's existing related images, in the 🖼 封面 dialog on its row
 — that copies nothing, it just points at the object already in the bucket. The 代理与关联文件 section lists and deletes the first two;
 the 公告 section lists and deletes the third. None of them upload.
 
 **Set an R2 lifecycle rule to abort incomplete multipart uploads** (7 days is
-reasonable) in the bucket's dashboard settings. *放弃并清理* aborts the one
-session it knows about, but an admin who never returns leaves parts that are
+reasonable) in the bucket's dashboard settings. *放弃并清理* and *取消* abort
+the session they belong to, but an admin who never returns leaves parts that are
 billed as storage with nothing referencing them. The rule is the only backstop
 that covers that case.
 

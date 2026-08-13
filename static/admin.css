@@ -163,10 +163,6 @@
 .btn-upload:hover { background: #FF9AAF; transform: scale(1.02); }
 .btn-upload:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
-#progress-wrapper {
-  margin-top: 1rem;
-}
-
 .upload-progress {
   height: 6px;
   background: var(--soft-blue);
@@ -212,6 +208,129 @@
   background: #FADBD8;
   color: #C0392B;
 }
+
+/* ── Upload queue ── */
+
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 1.1rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed var(--soft-blue);
+}
+
+.queue-title { font-weight: 600; font-size: 0.9rem; }
+
+/* Pushes the controls to the right edge on a wide row and simply wraps on a
+   phone — no width query, because the only thing that changes is whether the
+   free space exists. */
+.queue-conc {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--text-light);
+}
+
+.queue-conc input {
+  width: 3.4rem;
+  padding: 0.3rem 0.4rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+}
+
+.task-row {
+  padding: 0.7rem 0.8rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+}
+
+/* The state is the row's own colour, so a queue of ten reads at a glance
+   without anyone having to parse ten status strings. */
+.task-row[data-state="done"] { border-color: #A9DFBF; }
+.task-row[data-state="failed"] { border-color: var(--danger-border); }
+.task-row[data-state="error"],
+.task-row[data-state="paused"],
+.task-row[data-state="needs-file"],
+.task-row[data-state="awaiting-overwrite"] { border-color: #F5CBA7; }
+
+.task-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.45rem;
+}
+
+/* A filename is one unbroken token often enough to matter, and this row is a
+   flex child inside a container whose width the page depends on. */
+.task-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-badge {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--muted-bg);
+  color: var(--text-light);
+  white-space: nowrap;
+}
+
+.task-state {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--text-light);
+  white-space: nowrap;
+}
+
+.task-meta {
+  font-size: 0.78rem;
+  color: var(--text-light);
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.task-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+/* `.btn-rename-confirm` / `.btn-rename-cancel` carry only colours — their
+   shape comes from whichever dialog they sit in. These rows are not a dialog,
+   so they supply it here; `.btn-file-action` already has its own and is
+   unaffected by the colour-only pair above it. */
+.task-actions button {
+  font-size: 0.78rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.task-actions .btn-rename-confirm,
+.task-actions .btn-rename-cancel { border: none; }
+.task-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .file-list {
   list-style: none;

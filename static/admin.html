@@ -70,9 +70,9 @@
     <div class="admin-section" id="sec-upload">
       <h2 id="upload-title">🍰 上传文件</h2>
 
-      <!-- All three modes share one uploader. Proxies used to have their own
+      <!-- All five modes share one uploader. Proxies used to have their own
            stripped-down path with no resume, no progress bar and no wake lock;
-           reusing this one gives every attached-file mode all three. -->
+           reusing this one gives every attach mode those, and the queue. -->
       <div class="upload-mode" id="upload-mode">
         <label><input type="radio" name="upload-mode" value="file" checked> 📄 普通文件</label>
         <label><input type="radio" name="upload-mode" value="proxy"> 📹 代理</label>
@@ -85,7 +85,7 @@
         <div class="upload-zone-icon">🐾</div>
         <div class="upload-zone-text">点击或拖拽到此处</div>
         <div class="upload-zone-hint" id="upload-zone-hint">支持 JPG, PNG, GIF, MP4, WEBM, MP3, WAV 等</div>
-        <input type="file" id="file-input" accept="image/*,video/*,audio/*">
+        <input type="file" id="file-input" accept="image/*,video/*,audio/*" multiple>
       </div>
 
       <div class="form-group" id="group-custom-path">
@@ -110,34 +110,26 @@
       </div>
 
       <button class="btn-upload" id="upload-btn" disabled>
-        🚀 上传
+        🚀 加入上传队列
       </button>
 
-      <div class="duplicate-warning" id="dup-warning" hidden>
-        ⚠️ 文件 "<span id="dup-key"></span>" 已存在。是否覆盖？
-        <div class="dialog-actions-inline">
-          <button class="btn-rename-confirm" id="btn-overwrite">覆盖</button>
-          <button class="btn-rename-cancel" id="btn-cancel-overwrite">取消</button>
-        </div>
-      </div>
-
-      <div class="duplicate-warning" id="resume-banner" hidden>
-        <div id="resume-text"></div>
-        <div class="dialog-actions-inline">
-          <button class="btn-rename-confirm" id="btn-resume">继续上传</button>
-          <button class="btn-rename-cancel" id="btn-discard">放弃并清理</button>
-        </div>
-      </div>
-
-      <div id="progress-wrapper" hidden>
-        <div class="upload-progress">
-          <div class="upload-progress-bar" id="progress-bar" style="width:0%"></div>
-        </div>
-        <div class="upload-progress-text" id="progress-text"></div>
-        <div class="upload-wake-hint" id="wake-hint" hidden></div>
-      </div>
-
       <div class="upload-result" hidden id="upload-result"></div>
+
+      <!-- The upload queue. Clicking 上传 hands the picked files to this list
+           and clears the form, so the next batch can be picked — in another
+           mode, against another target — while these are still transferring.
+           Each row carries its own progress bar and its own controls; there is
+           no page-wide "an upload is happening" state any more. -->
+      <div class="queue-toolbar">
+        <span class="queue-title">📋 上传队列</span>
+        <span class="admin-count" id="queue-summary">队列为空</span>
+        <label class="queue-conc" for="queue-concurrency">同时上传
+          <input type="number" id="queue-concurrency" min="1" max="4" step="1" value="2">
+        </label>
+        <button class="btn-file-action" id="btn-clear-finished" disabled>清除已完成</button>
+      </div>
+      <div class="upload-wake-hint" id="wake-hint" hidden></div>
+      <div class="task-list" id="task-list" hidden></div>
     </div>
 
     <!-- Announcement Section

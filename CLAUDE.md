@@ -79,15 +79,16 @@ slash (clip ids, report ids, identity ids), takes `:name`.
 `cargo check` will not catch this. Neither will a unit test — there are none.
 It shows up as a 500 on every route at once.
 
-### One uploader, four modes
+### One uploader, five modes
 
 The admin upload section uploads a new file, a **proxy** (a low-quality playback
 source), an **attachment** (a downloadable related file — subtitles, a
-transcript) or **announcement media**; `session.mode` picks the branch. Only
-`/start` and `/complete` differ — `/admin/api/upload/part` already served all of
-them — so every attach mode gets resume, the progress bar, the wake lock and the
-retry set for free. Proxies used to have a parallel stripped-down uploader that
-had none of it, and each mode since would have grown another one.
+transcript), a **cover** or **announcement media**; `session.mode` picks the
+branch. Only `/start` and `/complete` differ — `/admin/api/upload/part` already
+served all of them — so every attach mode gets resume, the queue, the progress
+bar, the wake lock and the retry set for free. Proxies used to have a parallel
+stripped-down uploader that had none of it, and each mode since would have
+grown another one.
 
 The fourth mode also made the target polymorphic — see "The uploader's fourth
 mode binds to an id, not a path" below.
@@ -99,6 +100,10 @@ reclassifies attachments as file uploads. Every site goes through
 plain file — so a legacy session with no `mode` still resolves to a file upload
 without a special case, and the audit is one grep instead of nine.
 
+The spec is also where a mode's UI differences live rather than in a branch:
+`badge` names it on its queue row, and `single` is why 封面 is the one mode
+whose picker is not `multiple`.
+
 Three things that must stay branched:
 
 - **`uploadLanded()`**, the reconcile oracle for a lost `/complete` response,
@@ -106,12 +111,14 @@ Three things that must stay branched:
   in `/admin/api/files`, so asking the file listing would report every
   *successful* proxy/attachment upload as failed — and `complete` is the one
   step that must never be blindly retried, because it has already consumed the
-  multipart upload, so two reported failures send the admin to Discard over an
+  multipart upload, so two reported failures send the admin to 放弃 over an
   object sitting in the bucket. This is the expensive one to get wrong.
-- **`check-key` is skipped in both attach modes.** It tests `files.path` for
+- **`check-key` is skipped in every attach mode.** It tests `files.path` for
   collisions; proxies and attachments are deliberately many-per-`file_path`, so
-  it would raise the overwrite dialog over an unrelated file, and overwrite
-  means nothing for either.
+  it would raise the overwrite prompt over an unrelated file, and overwrite
+  means nothing for any of them. It is also why `/start` is the first `await`
+  in those modes, which is what makes the cancel-during-start race reachable —
+  see the queue section.
 - **`filename` is sent at `/attachment/complete` and ignored by
   `/proxy/complete`.** A proxy is only ever played, so its opaque storage key is
   enough; an attachment is downloaded, and `/api/file/{key}?download=1` has no
@@ -886,8 +893,18 @@ moov-at-tail fallback for files without `+faststart`.
 worker-rs 0.8.5's `MultipartUpload` is `upload_part` / `abort` / `complete` and
 nothing else — **there is no `list_parts`**. The server therefore cannot tell a
 returning client which parts already landed, so the part etags are persisted in
-`localStorage` under `zcll.upload.session` and replayed at `/upload/complete`.
-Do not "move this to the server"; there is no API to move it to.
+`localStorage` under `zcll.upload.session.<upload_id>` and replayed at
+`/upload/complete`. Do not "move this to the server"; there is no API to move
+it to.
+
+**One storage key per session**, plus `zcll.upload.sessions` holding the ids —
+deliberately not one map under one key. A map is a read-modify-write, and with
+several tasks each writing after every part, one `await` between the read and
+the write silently reverts a sibling's part list. Separate keys also stop a
+5000-part session being re-serialised every time some *other* upload lands a
+part. `zcll.upload.session` (no suffix) is what the single-session version
+wrote; `migrateLegacySession()` adopts it once, on load, so an upload that was
+in flight when the queue shipped is still resumable.
 
 Consequences that are easy to break:
 
@@ -917,6 +934,69 @@ Consequences that are easy to break:
   did, and a part that does time out is cheaper to resend. Raising it back
   trades 408s for fewer requests; don't, without measuring the upstream.
   Sessions stored under an older size keep working — they carry their own.
+
+### An upload is a task in a queue, not a mode of the page
+
+Picking files and clicking 上传 hands them to a queue and gives the form
+straight back, so several uploads — in different modes, against different
+targets — run at once and each is paused, resumed or cancelled on its own. The
+picker is `multiple` in every mode but 封面 (one cover per file, so N uploads
+would leave only the last).
+
+The state machine is the design. `ACTIVE_STATES` is exactly the set that holds
+a concurrency slot, and everything else follows from it:
+
+- **`awaiting-overwrite` is not active.** The duplicate prompt moved from a
+  page-wide banner into the row that raised it, precisely so a task waiting on
+  a decision cannot stall the rest of the queue — and so two collisions can be
+  answered independently rather than one dialog being overwritten by the next.
+- **`pausing` *is* active**, because the task is still unwinding an in-flight
+  part. Freeing the slot at the click would briefly run one more upload than
+  the limit allows.
+- `uploadInProgress` — which owns the wake lock's lifetime and the
+  `beforeunload` guard — is **derived** from that set by `syncActivity()` and
+  assigned nowhere else. As a flag one upload owned, task 1 finishing dropped
+  the lock while 2–4 were still transferring.
+
+**Concurrency defaults to 2 and is capped at 4, and the ceiling is not
+arbitrary.** 8 MB parts were chosen against the *whole* upstream, because
+Cloudflare's edge drops a body that arrives too slowly (the 408 in
+`isRetryable`). N parallel parts divide that upstream by N, so each part sits
+in the timing envelope a part N times its size would have: at 4, an 8 MB part
+is as exposed as the 32 MB one that made 408s routine. Raising it trades a slow
+link's reliability for fewer requests.
+
+Three things that look incidental and are not:
+
+- **`openUpload` must not abort any other session.** The single-session version
+  evicted whatever was stored when a new upload started, and aborted it so its
+  parts were not stranded. That same line in a queue aborts a *sibling task's*
+  multipart upload on every enqueue, and the sibling then fails at `/complete`
+  having transferred everything. Sessions are independent now; each is cleaned
+  up by its own task.
+- **Pause and cancel are delivered by `xhr.abort()`, which is indistinguishable
+  from a dropped connection** — both report status 0, which `isRetryable` says
+  to retry. So `throwIfInterrupted()` runs as the *first* statement in the
+  retry catch, before the retry test, and throws a control error that bypasses
+  both the retry budget and the resumable/fatal branch.
+- **A cancel that lands while `/start` is in flight has nothing to abort yet.**
+  `runTask` therefore re-checks `cancelRequested` after `openUpload` returns
+  and aborts what it just opened. Without that the upload sits in R2 with no
+  row, no task and nothing that knows its `upload_id` — a leak only the
+  lifecycle rule ever collects. The attach modes are where this actually
+  bites: they skip check-key, so `/start` is the first `await` and a cancel
+  in the same tick as the click lands squarely inside it.
+
+Pause is offered only from `queued` and `uploading` (`canPause`). The states in
+between are short round trips with nothing to interrupt, and honouring a pause
+in `checking` would leave `pauseRequested` set on a task that then asks about
+an overwrite — which would throw the moment the admin answered.
+
+A session restored from `localStorage` has no `File` (a handle cannot survive a
+reload), so it lands as a `needs-file` row with **its own picker**. Not the
+form's: that input is the enqueue path now, and one file can match two
+abandoned attempts at the same upload, so "which task did you mean" has to be
+answered by which row was clicked rather than inferred.
 
 ## Frontend
 

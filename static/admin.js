@@ -3,22 +3,21 @@
 const fileInput = document.getElementById('file-input');
 const uploadZone = document.getElementById('upload-zone');
 const uploadBtn = document.getElementById('upload-btn');
-const progressWrapper = document.getElementById('progress-wrapper');
-const progressBar = document.getElementById('progress-bar');
 const uploadResult = document.getElementById('upload-result');
 const customPath = document.getElementById('custom-path');
 const fileListEl = document.getElementById('admin-file-list');
 const attachTargetSelect = document.getElementById('attach-target');
 const attachLabelInput = document.getElementById('attach-label');
-let selectedFile = null;
+let selectedFiles = [];
 
 // ── Upload mode ──
 // 'file' uploads a new object; 'proxy' attaches a low-quality playback source
 // to an existing one; 'attachment' attaches a downloadable related file
-// (subtitles, transcripts); 'announcement' attaches an image, video or PDF to
-// an announcement. Everything between /start and /complete is identical —
-// /admin/api/upload/part serves all four — so they share this whole uploader,
-// resume and wake lock included.
+// (subtitles, transcripts); 'cover' sets a file's gallery poster;
+// 'announcement' attaches an image, video or PDF to an announcement.
+// Everything between /start and /complete is identical —
+// /admin/api/upload/part serves all of them — so they share this whole
+// uploader, queue, resume and wake lock included.
 //
 // Every mode test goes through `attachSpec()`, never a bare `=== 'proxy'`.
 // With only two modes, `=== 'proxy'` doubled as "not a plain file upload";
@@ -52,6 +51,7 @@ const ATTACH_SPECS = {
     listUrl: '/admin/api/proxy',
     listField: 'proxies',
     okPrefix: '✅ 代理上传成功!',
+    badge: '📹 代理',
   },
   attachment: {
     targetParam: 'file_path',
@@ -72,6 +72,7 @@ const ATTACH_SPECS = {
     listUrl: '/admin/api/attachment',
     listField: 'attachments',
     okPrefix: '✅ 关联文件上传成功!',
+    badge: '📎 关联文件',
   },
   cover: {
     targetParam: 'file_path',
@@ -93,6 +94,11 @@ const ATTACH_SPECS = {
     listUrl: '/admin/api/cover',
     listField: 'covers',
     okPrefix: '✅ 封面已设置!',
+    badge: '🖼 封面',
+    // One cover per file, so a multi-select would queue N uploads of which only
+    // the last survives — every earlier one would be released again the moment
+    // the next completed. The picker stays single-file in this mode alone.
+    single: true,
   },
   announcement: {
     targetParam: 'announcement_id',
@@ -114,6 +120,7 @@ const ATTACH_SPECS = {
     listUrl: '/admin/api/announcement-media',
     listField: 'media',
     okPrefix: '✅ 公告附件上传成功!',
+    badge: '📢 公告附件',
   },
 };
 
@@ -146,6 +153,9 @@ function applyUploadMode() {
   document.getElementById('group-attach-target').hidden = !spec;
   document.getElementById('group-attach-label').hidden = !spec;
   fileInput.accept = spec ? spec.accept : 'image/*,video/*,audio/*';
+  // Multi-select is what makes the queue worth having: one pick, N tasks.
+  // Only the cover mode opts out — see `single` in its spec.
+  fileInput.multiple = !(spec && spec.single);
   if (spec) {
     document.getElementById('attach-target-label').textContent = spec.targetLabel;
     document.getElementById('attach-target-hint').textContent = spec.targetHint;
@@ -159,7 +169,7 @@ function applyUploadMode() {
   // Without this the select keeps the previous mode's options and the first
   // upload posts a file path as an `announcement_id`.
   renderAttachTargets();
-  if (!selectedFile) {
+  if (!selectedFiles.length) {
     document.getElementById('upload-zone-hint').textContent =
       spec ? spec.zoneHint : '支持 JPG, PNG, GIF, MP4, WEBM, MP3, WAV 等';
   }
@@ -170,29 +180,39 @@ function applyUploadMode() {
 // one there is nothing to attach the upload to.
 function refreshUploadButton() {
   const needsTarget = !!attachSpec(uploadMode()) && !attachTargetSelect.value;
-  uploadBtn.disabled = !selectedFile || needsTarget;
+  uploadBtn.disabled = !selectedFiles.length || needsTarget;
 }
 
 document.querySelectorAll('input[name="upload-mode"]').forEach(r =>
   r.addEventListener('change', applyUploadMode));
 attachTargetSelect.addEventListener('change', refreshUploadButton);
 
-// File selection
-function onFileChosen(file) {
-  if (!file) return;
-  selectedFile = file;
+// File selection. The form is now only an *enqueue* form: picking files and
+// clicking 上传 hands them to the queue and immediately clears itself, so the
+// admin can pick the next batch — in a different mode if they like — while the
+// first is still transferring.
+function onFilesChosen(list) {
+  const files = [...(list || [])];
+  if (!files.length) return;
+  selectedFiles = files;
   refreshUploadButton();
-  document.querySelector('.upload-zone-text').textContent = file.name;
-  document.getElementById('upload-zone-hint').textContent =
-    formatSize(file.size) + ' — ' + (file.type || 'unknown');
-  // A File handle cannot survive a page reload, so a session restored from
-  // localStorage has no bytes to send until the admin picks the same file
-  // again. This is where that reconnection happens.
-  const session = loadSession();
-  if (session && sessionMatches(session, file)) showResumeBanner(file);
+  document.querySelector('.upload-zone-text').textContent =
+    files.length === 1 ? files[0].name : `${files.length} 个文件`;
+  const total = files.reduce((n, f) => n + f.size, 0);
+  document.getElementById('upload-zone-hint').textContent = files.length === 1
+    ? formatSize(total) + ' — ' + (files[0].type || 'unknown')
+    : `共 ${formatSize(total)}`;
 }
 
-fileInput.addEventListener('change', () => onFileChosen(fileInput.files[0]));
+function clearFormSelection() {
+  selectedFiles = [];
+  fileInput.value = '';
+  customPath.value = '';
+  document.querySelector('.upload-zone-text').textContent = '点击或拖拽到此处';
+  applyUploadMode();  // restores the mode's own zone hint and the button state
+}
+
+fileInput.addEventListener('change', () => onFilesChosen(fileInput.files));
 
 // Drag & drop
 uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
@@ -200,11 +220,9 @@ uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag
 uploadZone.addEventListener('drop', (e) => {
   e.preventDefault();
   uploadZone.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) {
-    fileInput.files = e.dataTransfer.files;
-    onFileChosen(file);
-  }
+  if (!e.dataTransfer.files.length) return;
+  fileInput.files = e.dataTransfer.files;
+  onFilesChosen(e.dataTransfer.files);
 });
 
 // Screen Wake Lock — a multi-GB upload takes long enough that an idle
@@ -224,6 +242,10 @@ const wakeHint = document.getElementById('wake-hint');
 let wakeLock = null;
 let wakeLockPending = null;
 let wakeLockWanted = false;
+// True while *any* task is transferring. With a queue this can no longer be a
+// flag one upload owns: task 1 finishing while 2–4 are still running must not
+// drop the lock or stop the beforeunload warning, so it is derived from the
+// queue by syncActivity() and never assigned anywhere else.
 let uploadInProgress = false;
 
 async function acquireWakeLock(site) {
@@ -243,7 +265,7 @@ async function acquireWakeLock(site) {
     wakeLock = await wakeLockPending;
     wakeLock.addEventListener('release', () => { wakeLock = null; });
     // releaseWakeLock() may have run while the request was in flight — the
-    // admin cancelled the overwrite dialog, say. It had no sentinel to
+    // admin cancelled the last queued task, say. It had no sentinel to
     // release then, so honour the intent now instead of leaking this one.
     if (!wakeLockWanted) {
       releaseWakeLock();
@@ -322,8 +344,8 @@ document.addEventListener('click', () => {
   acquireWakeLock('gesture').then(setWakeHint);
 }, true);
 
-// Closing the tab mid-upload kills the transfer and strands the multipart
-// upload in R2 — the abort call lives in doMultipartUpload's catch, which
+// Closing the tab mid-upload kills every running transfer and strands their
+// multipart uploads in R2 — the abort call lives in the task's catch, which
 // never runs if the page is gone. Warn before that happens.
 //
 // Browsers deliberately ignore any custom message here and show their own
@@ -346,25 +368,56 @@ window.addEventListener('beforeunload', (e) => {
 // Written after *every* successful part, not on failure: the usual way an
 // upload dies is a closed tab, a crash, or a sleeping machine, and none of
 // those reach a catch block.
-const SESSION_KEY = 'zcll.upload.session';
+//
+// One storage key per session (`zcll.upload.session.<upload_id>`) plus an
+// index of the ids, deliberately not one map under a single key. A map is a
+// read-modify-write, and with several tasks writing after every part, one
+// `await` between the read and the write silently reverts a sibling's part
+// list. Separate keys make each write independent — and stop a 5000-part
+// session being re-serialised every time some *other* task lands a part.
+const SESSION_PREFIX = 'zcll.upload.session.';
+const SESSION_INDEX = 'zcll.upload.sessions';
+// What the single-session version wrote. Migrated once, on load, so an upload
+// that was in flight when this version shipped is still resumable.
+const LEGACY_SESSION_KEY = 'zcll.upload.session';
 const PART_RETRIES = 6;          // 1+2+4+8+16s ≈ 31s of backoff
 const OFFLINE_WAIT_MS = 120000;  // per offline pause
 const MAX_OFFLINE_WAITS = 5;     // ≈10 min of tolerated disconnection
-let resumeFile = null; // in-memory File matching the stored session, if any
 
-const resumeBanner = document.getElementById('resume-banner');
-const resumeText = document.getElementById('resume-text');
-const btnResume = document.getElementById('btn-resume');
-const btnDiscard = document.getElementById('btn-discard');
-
+function sessionIds() {
+  try { return JSON.parse(localStorage.getItem(SESSION_INDEX) || '[]'); }
+  catch (_) { return []; }
+}
+function writeSessionIds(ids) {
+  try { localStorage.setItem(SESSION_INDEX, JSON.stringify(ids)); }
+  catch (_) { /* private mode / quota */ }
+}
 function saveSession(s) {
-  try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (_) { /* private mode / quota */ }
+  if (!s || !s.upload_id) return;
+  try {
+    localStorage.setItem(SESSION_PREFIX + s.upload_id, JSON.stringify(s));
+    const ids = sessionIds();
+    if (!ids.includes(s.upload_id)) { ids.push(s.upload_id); writeSessionIds(ids); }
+  } catch (_) { /* private mode / quota */ }
 }
-function loadSession() {
-  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (_) { return null; }
+function loadSession(uploadId) {
+  try { return JSON.parse(localStorage.getItem(SESSION_PREFIX + uploadId) || 'null'); }
+  catch (_) { return null; }
 }
-function clearSession() {
-  try { localStorage.removeItem(SESSION_KEY); } catch (_) { /* nothing to do */ }
+function clearSession(uploadId) {
+  try { localStorage.removeItem(SESSION_PREFIX + uploadId); } catch (_) { /* nothing to do */ }
+  writeSessionIds(sessionIds().filter(id => id !== uploadId));
+}
+function loadAllSessions() {
+  return sessionIds().map(loadSession).filter(s => s && s.upload_id);
+}
+
+function migrateLegacySession() {
+  let legacy = null;
+  try { legacy = JSON.parse(localStorage.getItem(LEGACY_SESSION_KEY) || 'null'); }
+  catch (_) { /* unparseable — nothing to carry over */ }
+  try { localStorage.removeItem(LEGACY_SESSION_KEY); } catch (_) { /* ignore */ }
+  if (legacy && legacy.upload_id && !loadSession(legacy.upload_id)) saveSession(legacy);
 }
 
 // Resuming with the wrong file would splice foreign bytes into the object,
@@ -391,47 +444,6 @@ async function abortSession(s) {
   } catch (_) { /* best effort — an R2 lifecycle rule is the real backstop */ }
 }
 
-function showResumeBanner(file) {
-  const s = loadSession();
-  if (!s) { resumeBanner.hidden = true; return; }
-  resumeFile = file && sessionMatches(s, file) ? file : null;
-  const total = sessionChunks(s);
-  const pct = Math.round((s.parts.length / total) * 100);
-  const progress = `${s.parts.length}/${total} 分片 (${pct}%)`;
-  resumeText.textContent = resumeFile
-    ? `⏸ "${s.file.name}" 已上传 ${progress}，可继续。`
-    : `⏸ 有未完成的上传: "${s.file.name}" — ${progress}。请重新选择同一个文件以继续。`;
-  btnResume.disabled = !resumeFile;
-  resumeBanner.hidden = false;
-}
-
-btnResume.addEventListener('click', () => {
-  const s = loadSession();
-  if (!s || !resumeFile || !sessionMatches(s, resumeFile)) {
-    releaseWakeLock(); // no upload is starting; don't hold the screen awake
-    showResult(false, '❌ 所选文件与未完成的上传不匹配，无法续传。');
-    return;
-  }
-  resumeBanner.hidden = true;
-  acquireWakeLock('click'); // this click is the gesture WebKit requires
-  runUpload(resumeFile, s);
-});
-
-btnDiscard.addEventListener('click', async () => {
-  const s = loadSession();
-  resumeBanner.hidden = true;
-  resumeFile = null;
-  clearSession();
-  await abortSession(s);
-  showResult(true, '🗑 已放弃未完成的上传，服务端分片已清理。');
-});
-
-// A stored session outlives the page, so surface it on load. There is no
-// File yet, so the banner asks for a re-selection rather than offering
-// Resume outright.
-if (loadSession()) showResumeBanner(null);
-
-// Upload — multipart for large files
 // Part size is bounded from both ends. R2 wants parts ≥5 MB (except the
 // last) and at most 10,000 of them. Cloudflare separately drops a request
 // whose body arrives too slowly — an undocumented edge timeout that
@@ -449,140 +461,263 @@ function chunkSizeFor(fileSize) {
   const needed = Math.ceil(fileSize / MAX_PARTS);
   return Math.max(MIN_CHUNK_SIZE, Math.ceil(needed / (1024 * 1024)) * 1024 * 1024);
 }
-const dupWarning = document.getElementById('dup-warning');
-const dupKeyEl = document.getElementById('dup-key');
-const btnOverwrite = document.getElementById('btn-overwrite');
-const btnCancelOverwrite = document.getElementById('btn-cancel-overwrite');
-let pendingOverwriteFile = null;
-let pendingOverwritePath = null;
 
-// pointerdown is the earliest event carrying transient activation, and it
-// fires well before the click handler's own request. Costs nothing when
-// that one would have succeeded anyway, and widens the window when it
-// wouldn't — the shared in-flight guard means only one request is made.
-uploadBtn.addEventListener('pointerdown', () => {
-  if (selectedFile) acquireWakeLock('pointerdown');
+// ---- The upload queue ----------------------------------------------
+//
+// An upload is a *task*, not a modal state of this page. Clicking 上传 hands
+// the picked files to this queue and gives the form straight back, so several
+// files — in different modes, against different targets — can be in flight at
+// once, and each one can be paused, resumed or cancelled on its own.
+//
+// Concurrency defaults to 2 and is capped at 4, and that ceiling is not
+// arbitrary. The 8 MB part size exists because Cloudflare's edge drops a
+// request body that arrives too slowly (the 408 in `isRetryable`), and it was
+// picked against the *whole* upstream. N parallel parts divide that upstream
+// by N, so each part sits in the timing envelope a part N times its size would
+// have: at 4, an 8 MB part is as exposed as the 32 MB one that made 408s
+// routine. Raising this trades a slow link's reliability for request count —
+// don't, without measuring the upstream first.
+const CONCURRENCY_KEY = 'zcll.upload.concurrency';
+const MAX_CONCURRENCY = 4;
+const DEFAULT_CONCURRENCY = 2;
+
+const taskListEl = document.getElementById('task-list');
+const queueSummaryEl = document.getElementById('queue-summary');
+const concurrencyInput = document.getElementById('queue-concurrency');
+const btnClearFinished = document.getElementById('btn-clear-finished');
+
+const tasks = [];
+let maxConcurrent = readConcurrency();
+
+function readConcurrency() {
+  const stored = parseInt(localStorage.getItem(CONCURRENCY_KEY) || '', 10);
+  if (!Number.isFinite(stored)) return DEFAULT_CONCURRENCY;
+  return Math.min(MAX_CONCURRENCY, Math.max(1, stored));
+}
+
+concurrencyInput.max = String(MAX_CONCURRENCY);
+concurrencyInput.value = String(maxConcurrent);
+concurrencyInput.addEventListener('change', () => {
+  maxConcurrent = Math.min(MAX_CONCURRENCY, Math.max(1, parseInt(concurrencyInput.value, 10) || DEFAULT_CONCURRENCY));
+  concurrencyInput.value = String(maxConcurrent);
+  try { localStorage.setItem(CONCURRENCY_KEY, String(maxConcurrent)); } catch (_) { /* per-page-view only */ }
+  // Raising it must take effect now, not at the next completion.
+  pump();
 });
 
-uploadBtn.addEventListener('click', () => {
-  if (!selectedFile) return;
-  // Ask for the lock here, synchronously in the gesture, not later in
-  // doMultipartUpload — that runs after the check-key round trip, by which
-  // point any transient activation has expired. MDN's examples acquire from
-  // a click for exactly this reason, on every engine. Before the mode
-  // branch, because the branch below is what would cost the activation.
-  acquireWakeLock('click');
+// The states that hold a concurrency slot: everything from the moment a task
+// leaves the queue until it stops touching the network. 'pausing' is in the
+// set on purpose — the task is still unwinding an in-flight part, and letting
+// a sibling start before it lands would briefly exceed the limit.
+const ACTIVE_STATES = new Set(['checking', 'starting', 'uploading', 'completing', 'pausing']);
+// States a task can be resumed out of, i.e. where 继续 is offered.
+const RESUMABLE_STATES = new Set(['paused', 'error']);
 
-  const mode = uploadMode();
-  const spec = attachSpec(mode);
-  if (spec) {
-    const target = attachTargetSelect.value;
-    if (!target) { releaseWakeLock(); showResult(false, '❌ 请先选择上传目标。'); return; }
-    // No check-key: that endpoint tests `files.path` for collisions, and
-    // everything attached deliberately has no uniqueness on its target (many
-    // proxies per file, many attachments per file, many media per announcement
-    // is the point). Running it would raise the overwrite dialog over an
-    // unrelated file, and overwrite means nothing here. In the announcement
-    // mode it would not even be asking about the right table.
-    doMultipartUpload(selectedFile, '', false, {
-      mode,
-      target,
-      label: attachLabelInput.value.trim() || spec.fallbackLabel,
-    });
-    return;
-  }
-  checkDuplicateThenUpload(selectedFile, customPath.value.trim());
-});
+const STATE_TEXT = {
+  queued: '⏳ 排队中',
+  checking: '🔍 检查重名',
+  'awaiting-overwrite': '⚠️ 名称已存在',
+  starting: '🚀 创建上传',
+  uploading: '⬆️ 上传中',
+  pausing: '⏸ 暂停中…',
+  paused: '⏸ 已暂停',
+  completing: '📦 合并分片',
+  done: '✅ 完成',
+  error: '⏸ 已中断',
+  failed: '❌ 失败',
+  'needs-file': '📂 待重新选择文件',
+  cancelled: '🚫 已取消',
+};
 
-btnOverwrite.addEventListener('click', () => {
-  dupWarning.hidden = true;
-  if (pendingOverwriteFile) {
-    acquireWakeLock('click'); // fresh gesture; the check-key pause released it
-    doMultipartUpload(pendingOverwriteFile, pendingOverwritePath, true);
-    pendingOverwriteFile = null;
-    pendingOverwritePath = null;
-  }
-});
+function activeCount() { return tasks.filter(t => ACTIVE_STATES.has(t.state)).length; }
 
-btnCancelOverwrite.addEventListener('click', () => {
-  dupWarning.hidden = true;
-  pendingOverwriteFile = null;
-  pendingOverwritePath = null;
-  releaseWakeLock();
-  uploadBtn.disabled = false;
-  uploadBtn.textContent = '🚀 上传';
-});
-
-async function checkDuplicateThenUpload(file, path) {
-  uploadBtn.disabled = true;
-  uploadBtn.textContent = '⏳ 检查重名...';
-  uploadResult.hidden = true;
-  dupWarning.hidden = true;
-
-  try {
-    const checkResp = await fetchWithRetry('/admin/api/files/check-key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        filename: file.name,
-        path: path || undefined,
-      }),
-    });
-    if (!checkResp.ok) {
-      // If check fails, proceed anyway — server will catch duplicates
-      doMultipartUpload(file, path, false);
-      return;
-    }
-    const checkData = await checkResp.json();
-
-    if (checkData.exists) {
-      // No upload is starting — hand the lock back rather than holding the
-      // screen awake while the dialog waits for a decision. If the admin
-      // abandons the dialog instead of answering, the browser releases the
-      // lock itself the moment the tab is hidden, so the worst case is
-      // bounded. The other exits from this function (check failed, or it
-      // threw) fall through to doMultipartUpload and keep the lock.
-      releaseWakeLock();
-      dupKeyEl.textContent = checkData.path;
-      dupWarning.hidden = false;
-      pendingOverwriteFile = file;
-      pendingOverwritePath = path;
-      uploadBtn.textContent = '🚀 上传';
-    } else {
-      doMultipartUpload(file, path, false);
-    }
-  } catch (_) {
-    // Check failed — proceed anyway
-    doMultipartUpload(file, path, false);
+// The single writer for `uploadInProgress`, and therefore for the wake lock's
+// lifetime and the beforeunload guard. Called from setState, so no state
+// transition can forget it.
+function syncActivity() {
+  const busy = activeCount() > 0;
+  if (busy === uploadInProgress) return;
+  uploadInProgress = busy;
+  if (busy) {
+    settleWakeHint();
+  } else {
+    // The last task stopped. A paused or interrupted one is not "in progress":
+    // its session survives a reload and 继续 re-acquires the lock inside its
+    // own click.
+    releaseWakeLock();
+    setTimeout(() => { if (!uploadInProgress) wakeHint.hidden = true; }, 1500);
   }
 }
 
-// Opens a fresh multipart upload, then hands off to runUpload. Split from
-// the transfer loop so that resuming can re-enter the loop with a stored
-// session and never call /upload/start twice — a second start would mint a
-// second key and orphan everything already uploaded under the first.
-async function doMultipartUpload(file, path, overwrite, attachTarget) {
-  uploadBtn.disabled = true;
-  uploadBtn.textContent = '⏳ 创建上传...';
-  uploadResult.hidden = true;
-  dupWarning.hidden = true;
+function setState(task, state) {
+  task.state = state;
+  renderTask(task);
+  syncActivity();
+  renderQueueSummary();
+}
 
+// The scheduler. Idempotent and cheap, so every state change may call it.
+function pump() {
+  while (activeCount() < maxConcurrent) {
+    const next = tasks.find(t => t.state === 'queued');
+    if (!next) break;
+    // startTask sets an active state synchronously before it awaits anything —
+    // otherwise this loop would hand every slot to the same task.
+    startTask(next);
+  }
+  renderQueueSummary();
+}
+
+function enqueue(file, opts) {
+  const task = {
+    file,
+    mode: opts.mode,
+    target: opts.target || '',
+    label: opts.label || '',
+    path: opts.path || '',
+    overwrite: false,
+    session: null,
+    state: 'queued',
+    loaded: 0,
+    total: file ? file.size : 0,
+    note: '',
+    error: '',
+    xhr: null,
+    pauseRequested: false,
+    cancelRequested: false,
+    dupChecked: false,
+  };
+  tasks.push(task);
+  buildTaskRow(task);
+  return task;
+}
+
+// A session restored from localStorage has no File — a File handle cannot
+// survive a reload — so it lands as a task that is complete in every way
+// except the bytes, and asks for the same file back.
+function adoptSession(session) {
+  const task = {
+    file: null,
+    mode: session.mode || 'file',
+    target: sessionAttachTarget(session),
+    label: sessionAttachLabel(session),
+    path: session.path || '',
+    overwrite: !!session.overwrite,
+    session,
+    state: 'needs-file',
+    loaded: 0,
+    total: session.file ? session.file.size : 0,
+    note: '',
+    error: '',
+    xhr: null,
+    pauseRequested: false,
+    cancelRequested: false,
+    dupChecked: true,   // it already passed check-key when it was started
+  };
+  const done = new Map((session.parts || []).map(p => [p.n, p]));
+  task.loaded = bytesDone(done, session);
+  tasks.push(task);
+  buildTaskRow(task);
+  return task;
+}
+
+function taskName(task) {
+  if (task.file) return task.file.name;
+  return (task.session && task.session.file && task.session.file.name) || '(未知文件)';
+}
+
+function startTask(task) {
+  setState(task, 'starting');
+  runTask(task)
+    .catch(err => {
+      // runTask handles its own failures; anything reaching here is a bug in
+      // this file, and swallowing it silently would strand the slot.
+      console.error('Upload task crashed:', err);
+      task.error = String(err && err.message || err);
+      setState(task, 'failed');
+    })
+    .finally(() => { task.xhr = null; pump(); });
+}
+
+async function runTask(task) {
+  const spec = attachSpec(task.mode);
+
+  // 1. Duplicate name check — plain file uploads only. That endpoint tests
+  //    `files.path` for collisions, and everything attached deliberately has
+  //    no uniqueness on its target (many proxies per file, many attachments
+  //    per file, many media per announcement is the point). Running it in an
+  //    attach mode would raise the overwrite prompt over an unrelated file,
+  //    and overwrite means nothing there. In the announcement mode it would
+  //    not even be asking about the right table.
+  if (!spec && !task.session && !task.overwrite && !task.dupChecked) {
+    setState(task, 'checking');
+    task.dupChecked = true;
+    const taken = await checkDuplicate(task);
+    if (task.cancelRequested) return;
+    if (taken) {
+      task.dupPath = taken;
+      // Waiting for a decision must not hold a slot — the rest of the queue
+      // keeps moving while this row asks.
+      setState(task, 'awaiting-overwrite');
+      return;
+    }
+  }
+
+  // 2. Open the multipart upload, unless this task already has one. Resume
+  //    replays the stored session and never calls /start again: a second start
+  //    would mint a second key and orphan everything already sent.
+  if (!task.session) {
+    setState(task, 'starting');
+    const ok = await openUpload(task);
+    if (!ok) return;
+    // Cancel arriving *while* /start was in flight had nothing to abort when
+    // it ran — the session did not exist yet. Without this the upload it just
+    // opened would sit in R2 with no row, no task and nothing that knows its
+    // upload_id, i.e. a leak only the lifecycle rule ever cleans up.
+    if (task.cancelRequested) {
+      clearSession(task.session.upload_id);
+      await abortSession(task.session);
+      return;
+    }
+  }
+
+  // 3. Transfer, then complete.
+  await transfer(task);
+}
+
+// Returns the colliding path, or '' for "no collision / could not tell".
+async function checkDuplicate(task) {
+  try {
+    const resp = await fetchWithRetry('/admin/api/files/check-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: task.file.name, path: task.path || undefined }),
+    });
+    if (!resp.ok) return '';   // the server catches duplicates at /start anyway
+    const data = await resp.json();
+    return data.exists ? data.path : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function openUpload(task) {
+  const spec = attachSpec(task.mode);
+  const file = task.file;
   const contentType = file.type || 'application/octet-stream';
-  const spec = attachTarget ? attachSpec(attachTarget.mode) : null;
-  let session;
   try {
     const startResp = spec
       ? await fetchWithRetry(spec.startUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            // Computed key: the target is a file path in two modes and an
-            // announcement id in the third, and the server reads whichever
+            // Computed key: the target is a file path in three modes and an
+            // announcement id in the fourth, and the server reads whichever
             // name its own table is keyed on.
-            [spec.targetParam]: attachTarget.target,
+            [spec.targetParam]: task.target,
             filename: file.name,
             content_type: contentType,
-            label: attachTarget.label,
+            label: task.label,
           }),
         })
       : await fetchWithRetry('/admin/api/upload/start', {
@@ -591,53 +726,53 @@ async function doMultipartUpload(file, path, overwrite, attachTarget) {
           body: JSON.stringify({
             filename: file.name,
             content_type: contentType,
-            path: path || undefined,
-            overwrite: overwrite || false,
+            path: task.path || undefined,
+            overwrite: task.overwrite,
           }),
         });
     if (!startResp.ok) {
       const errData = await startResp.json().catch(() => ({}));
       if (startResp.status === 409 && errData.error === 'duplicate') {
-        showResult(false, `❌ 文件已存在: ${errData.path}。请刷新页面后重试。`);
-        uploadBtn.textContent = '🚀 上传';
-        uploadBtn.disabled = false;
-        return;
+        // Lost the race with another upload (or another tab) between the
+        // check and the start. Offer the same decision the check does.
+        task.dupPath = errData.path || task.path;
+        setState(task, 'awaiting-overwrite');
+        return false;
       }
-      throw new Error(`Start failed: ${startResp.status}`);
+      throw new Error(`创建上传失败: HTTP ${startResp.status}`);
     }
     const startData = await startResp.json();
-    session = {
+    // Deliberately no "abort the previous session" step here. The
+    // single-session version evicted whatever was stored whenever a new upload
+    // started, and aborting it was how it avoided stranding those parts in R2.
+    // With a queue that same line would abort every sibling task's multipart
+    // upload on each enqueue. Sessions are now independent, and each one is
+    // cleaned up by its own task (cancel, discard, or a fatal failure).
+    task.session = {
       upload_id: startData.upload_id,
       key: startData.key,       // server-minted; resume replays it, never re-mints
       path: startData.path,
       contentType,
       chunkSize: chunkSizeFor(file.size),
-      overwrite: !!overwrite,
+      overwrite: task.overwrite,
       // Read back through `attachSpec(session.mode)`, so a session written
       // before attach modes existed (no `mode`, or `mode: 'file'`) resolves to
       // a plain file upload without a special case.
-      mode: attachTarget ? attachTarget.mode : 'file',
+      mode: task.mode,
       // Legacy field name, read back through `sessionAttachTarget()` — see there.
-      attachFilePath: attachTarget ? attachTarget.target : undefined,
-      attachLabel: attachTarget ? attachTarget.label : undefined,
+      attachFilePath: spec ? task.target : undefined,
+      attachLabel: spec ? task.label : undefined,
       parts: [],
       file: { name: file.name, size: file.size, lastModified: file.lastModified },
     };
-    // Only one session is stored, so starting a new upload evicts whatever
-    // was there. Abort it rather than leaving its parts stranded in R2 with
-    // nothing left that knows the upload_id.
-    const stale = loadSession();
-    if (stale && stale.upload_id !== session.upload_id) await abortSession(stale);
-    saveSession(session);
+    saveSession(task.session);
+    return true;
   } catch (err) {
     console.error('Upload start failed:', err);
-    showResult(false, `❌ 上传失败: ${err.message}`);
-    uploadBtn.textContent = '🚀 上传';
-    uploadBtn.disabled = false;
-    return;
+    task.error = err.message;
+    setState(task, 'failed');
+    return false;
   }
-
-  await runUpload(file, session);
 }
 
 // Bytes already committed, derived from which part numbers are done. Every
@@ -651,195 +786,453 @@ function bytesDone(doneParts, session) {
   return total;
 }
 
-function renderProgress(loaded, size) {
-  // size 0 is a legitimate upload (R2 still wants one empty part), and
-  // 0/0 would put NaN in the width.
-  progressBar.style.width = (size > 0 ? Math.round((loaded / size) * 100) : 100) + '%';
-  document.getElementById('progress-text').textContent =
-    `${formatSize(loaded)} / ${formatSize(size)}`;
+// Pause and cancel are delivered by aborting the in-flight XHR, which fires
+// the same `error` listener a dropped connection does — status 0, which
+// `isRetryable` says to retry. So the task's own intent is checked first,
+// everywhere the loop can be interrupted, and throws a control error that
+// bypasses both the retry budget and the resumable/fatal branch below.
+function throwIfInterrupted(task) {
+  if (task.cancelRequested) { const e = new Error('已取消'); e.control = 'cancelled'; throw e; }
+  if (task.pauseRequested) { const e = new Error('已暂停'); e.control = 'paused'; throw e; }
 }
 
-// The transfer loop. Entered both by a fresh upload and by Resume, and it
-// cannot tell the difference — the only input is the session.
-async function runUpload(file, session) {
-  uploadBtn.disabled = true;
-  progressWrapper.hidden = false;
-  uploadResult.hidden = true;
-  dupWarning.hidden = true;
-
-  uploadInProgress = true;
-  // The progress bar and the resume banner live in the upload section, so it
-  // cannot stay shut behind a collapse restored from a previous visit.
-  expandUploadSection();
-  // Deliberately does NOT request a lock. runUpload is reached after the
-  // check-key and /upload/start round trips, so it has no user activation
-  // left and WebKit refuses — which would overwrite a lock the click
-  // already secured with a spurious "refused" hint. Report the click's
-  // result instead, waiting for it if it is still in flight.
-  settleWakeHint();
+async function transfer(task) {
+  const session = task.session;
+  const file = task.file;
+  setState(task, 'uploading');
 
   // Always the session's chunk size, never chunkSizeFor(). R2 requires every
   // part but the last to be identically sized, so raising the constant
   // would silently corrupt any session started under the old one.
   const totalChunks = sessionChunks(session);
-  const done = new Map(session.parts.map(p => [p.n, p]));
-  renderProgress(bytesDone(done, session), file.size);
+  const done = new Map((session.parts || []).map(p => [p.n, p]));
+  task.total = file.size;
+  setProgress(task, bytesDone(done, session));
 
   try {
     for (let i = 0; i < totalChunks; i++) {
       const n = i + 1;
       if (done.has(n)) continue; // already committed in an earlier attempt
+      throwIfInterrupted(task);
 
       const start = i * session.chunkSize;
       const chunk = file.slice(start, Math.min(start + session.chunkSize, file.size));
       const base = bytesDone(done, session);
 
-      uploadBtn.textContent = `⏳ 上传中 ${n}/${totalChunks}...`;
-      const part = await uploadChunkWithRetry(session, n, chunk, (chunkLoaded) => {
-        renderProgress(base + chunkLoaded, file.size);
+      task.note = `分片 ${n}/${totalChunks}`;
+      renderTask(task);
+      const part = await uploadChunkWithRetry(task, n, chunk, (chunkLoaded) => {
+        setProgress(task, base + chunkLoaded);
       });
 
       done.set(n, { n: part.part_number, etag: part.etag });
       session.parts = [...done.values()].sort((a, b) => a.n - b.n);
       saveSession(session);
-      renderProgress(bytesDone(done, session), file.size);
+      setProgress(task, bytesDone(done, session));
     }
 
-    uploadBtn.textContent = '⏳ 完成中...';
-    progressBar.style.width = '100%';
+    throwIfInterrupted(task);
+    task.note = '';
+    setState(task, 'completing');
+    const completeData = await completeUpload(task);
 
-    // Complete is the one step that must never be blindly retried: a
-    // success whose response was lost leaves the multipart upload consumed,
-    // so a second attempt errors forever over a file that is already in the
-    // bucket. Reconcile against the listing before believing the failure.
-    let completeData;
-    try {
-      const spec = attachSpec(session.mode);
-      const completeResp = spec
-        ? await fetch(spec.completeUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              upload_id: session.upload_id,
-              key: session.key,
-              [spec.targetParam]: sessionAttachTarget(session),
-              label: sessionAttachLabel(session),
-              // Ignored by /proxy/complete. An attachment and an announcement's
-              // media are downloaded rather than played, and the storage key is
-              // opaque, so the display name has to be carried across explicitly.
-              filename: session.file.name,
-              content_type: session.contentType,
-              parts: session.parts,
-            }),
-          })
-        : await fetch(
-        `/admin/api/upload/complete?upload_id=${encodeURIComponent(session.upload_id)}&key=${encodePath(session.key)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            parts: session.parts,
-            content_type: session.contentType,
-            path: session.path,
-            overwrite: session.overwrite,
-          }),
-        }
-      );
-      if (completeResp.status === 409) {
-        // Two different dead-session verdicts share this status, and both are
-        // fatal — the server has already refused, so Resume can only loop.
-        //   `duplicate`  someone took this name while the session was paused
-        //   `file_gone`  the parent file was deleted under an attach upload;
-        //                the server aborted the multipart upload on its way out
-        // The message must come from the server for `file_gone`: it is the only
-        // thing that tells the admin the *file* went away rather than the name
-        // being taken, and sending them to re-upload a proxy for a file that no
-        // longer exists is a guaranteed second failure.
-        const d = await completeResp.json().catch(() => ({}));
-        throw uploadError(
-          d.error === 'duplicate' || !d.message
-            ? `名称 "${d.path || session.path}" 已被其他文件占用，无法完成续传。`
-            : d.message,
-          409, true);
-      }
-      if (!completeResp.ok) {
-        throw uploadError(await errorMessage(completeResp), completeResp.status);
-      }
-      completeData = await completeResp.json();
-    } catch (err) {
-      if (err.fatal) throw err;
-      const landed = await uploadLanded(session);
-      if (landed) {
-        completeData = { path: landed.path, size: landed.size };
-      } else {
-        // Genuinely not committed. Resume can retry this, but only twice —
-        // if complete() consumed the upload and the D1 insert then failed,
-        // the handler deleted the object and no retry can ever succeed.
-        // Bail out rather than leaving the admin in a Resume loop.
-        session.completeFailures = (session.completeFailures || 0) + 1;
-        saveSession(session);
-        if (session.completeFailures >= 2) {
-          throw uploadError(`无法完成上传（${err.message}）。请放弃并重新上传。`, err.status, true);
-        }
-        throw err;
-      }
-    }
-
-    clearSession();
-    resumeFile = null;
-    resumeBanner.hidden = true;
+    clearSession(session.upload_id);
+    task.loaded = task.total;
+    const doneSpec = attachSpec(task.mode);
     // An attached upload has no display path of its own — it belongs to a file
-    // or an announcement, and no attach completion returns `path`. Reading
-    // `.path` here is what printed "→ undefined". The session's own target is
-    // the fallback, and the only thing the announcement mode can print.
-    const doneSpec = attachSpec(session.mode);
-    showResult(true, doneSpec
-      ? `${doneSpec.okPrefix} ${sessionAttachLabel(session)} → ${completeData.file_path || sessionAttachTarget(session)} (${formatSize(completeData.size)})`
-      : `✅ 上传成功! ${completeData.path} (${formatSize(completeData.size)})`);
-    customPath.value = '';
-    selectedFile = null;
-    fileInput.value = '';
-    document.querySelector('.upload-zone-text').textContent = '点击或拖拽到此处';
-    applyUploadMode();  // restores the mode's own zone hint and button state
-    loadFiles();
+    // or an announcement, and no attach completion returns `path`. The
+    // session's own target is the fallback, and the only thing the
+    // announcement mode can print.
+    task.note = doneSpec
+      ? `${doneSpec.okPrefix} ${sessionAttachLabel(session)} → ${completeData.file_path || sessionAttachTarget(session)}`
+      : `✅ ${completeData.path}`;
+    setState(task, 'done');
+    scheduleFilesReload();
 
   } catch (err) {
+    if (err.control === 'cancelled') return;   // cancelTask owns the cleanup
+    if (err.control === 'paused') {
+      task.pauseRequested = false;
+      task.note = '';
+      saveSession(session);
+      setState(task, 'paused');
+      return;
+    }
     console.error('Upload error:', err);
-    const resumable = session.parts.length > 0 && !err.fatal;
-    if (resumable) {
+    task.error = err.message;
+    task.note = '';
+    if (session.parts.length > 0 && !err.fatal) {
       // Deliberately no abort call. Aborting here is what used to throw
       // away every part already transferred; leaving the multipart upload
-      // open is what makes Resume possible at all. The cost is an orphaned
-      // upload in R2 if the admin never comes back — Discard cleans it up,
+      // open is what makes 继续 possible at all. The cost is an orphaned
+      // upload in R2 if the admin never comes back — 放弃 cleans it up,
       // and an R2 lifecycle rule is the backstop for the rest.
       saveSession(session);
-      showResult(false,
-        `⏸ 上传中断: ${err.message} — 已保留 ${session.parts.length}/${totalChunks} 个分片，可继续。`);
-      showResumeBanner(file);
+      setState(task, 'error');
     } else {
       await abortSession(session);
-      clearSession();
-      resumeFile = null;
-      resumeBanner.hidden = true;
-      showResult(false, `❌ 上传失败: ${err.message}`);
+      clearSession(session.upload_id);
+      setState(task, 'failed');
     }
-  } finally {
-    // A paused upload is not an upload in progress: the lock comes off and
-    // beforeunload stops warning, because the session now survives a reload
-    // and Resume re-acquires the lock inside its own click.
-    uploadInProgress = false;
-    releaseWakeLock();
-    uploadBtn.disabled = !selectedFile;
-    uploadBtn.textContent = '🚀 上传';
-    setTimeout(() => {
-      progressWrapper.hidden = true;
-      wakeHint.hidden = true;
-    }, 1500);
   }
 }
 
+// Complete is the one step that must never be blindly retried: a success
+// whose response was lost leaves the multipart upload consumed, so a second
+// attempt errors forever over a file that is already in the bucket.
+// Reconcile against the listing before believing the failure.
+async function completeUpload(task) {
+  const session = task.session;
+  try {
+    const spec = attachSpec(session.mode);
+    const completeResp = spec
+      ? await fetch(spec.completeUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            upload_id: session.upload_id,
+            key: session.key,
+            [spec.targetParam]: sessionAttachTarget(session),
+            label: sessionAttachLabel(session),
+            // Ignored by /proxy/complete. An attachment and an announcement's
+            // media are downloaded rather than played, and the storage key is
+            // opaque, so the display name has to be carried across explicitly.
+            filename: session.file.name,
+            content_type: session.contentType,
+            parts: session.parts,
+          }),
+        })
+      : await fetch(
+          `/admin/api/upload/complete?upload_id=${encodeURIComponent(session.upload_id)}&key=${encodePath(session.key)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              parts: session.parts,
+              content_type: session.contentType,
+              path: session.path,
+              overwrite: session.overwrite,
+            }),
+          }
+        );
+    if (completeResp.status === 409) {
+      // Two different dead-session verdicts share this status, and both are
+      // fatal — the server has already refused, so 继续 can only loop.
+      //   `duplicate`  someone took this name while the session was paused
+      //   `file_gone`  the parent file was deleted under an attach upload;
+      //                the server aborted the multipart upload on its way out
+      // The message must come from the server for `file_gone`: it is the only
+      // thing that tells the admin the *file* went away rather than the name
+      // being taken, and sending them to re-upload a proxy for a file that no
+      // longer exists is a guaranteed second failure.
+      const d = await completeResp.json().catch(() => ({}));
+      throw uploadError(
+        d.error === 'duplicate' || !d.message
+          ? `名称 "${d.path || session.path}" 已被其他文件占用，无法完成续传。`
+          : d.message,
+        409, true);
+    }
+    if (!completeResp.ok) {
+      throw uploadError(await errorMessage(completeResp), completeResp.status);
+    }
+    return await completeResp.json();
+  } catch (err) {
+    if (err.fatal) throw err;
+    const landed = await uploadLanded(session);
+    if (landed) return { path: landed.path, size: landed.size, file_path: landed.path };
+    // Genuinely not committed. 继续 can retry this, but only twice — if
+    // complete() consumed the upload and the D1 insert then failed, the
+    // handler deleted the object and no retry can ever succeed. Bail out
+    // rather than leaving the admin in a resume loop.
+    session.completeFailures = (session.completeFailures || 0) + 1;
+    saveSession(session);
+    if (session.completeFailures >= 2) {
+      throw uploadError(`无法完成上传（${err.message}）。请放弃并重新上传。`, err.status, true);
+    }
+    throw err;
+  }
+}
+
+// ── Task controls ──
+
+// Only from 'queued' and 'uploading'. The states in between — checking,
+// starting, completing — are short round trips with nothing to interrupt, and
+// honouring a pause in them would leave `pauseRequested` set for a task that
+// then goes on to ask about an overwrite, which would throw the moment the
+// admin answered.
+function canPause(task) { return task.state === 'queued' || task.state === 'uploading'; }
+
+function pauseTask(task) {
+  if (!canPause(task)) return;
+  if (task.state === 'queued') { setState(task, 'paused'); return; }
+  task.pauseRequested = true;
+  setState(task, 'pausing');
+  abortInFlight(task);
+}
+
+function resumeTask(task) {
+  if (!task.file) return;             // an adopted session still needs its bytes
+  task.pauseRequested = false;
+  task.error = '';
+  setState(task, 'queued');
+  acquireWakeLock('click');           // this click is the gesture WebKit requires
+  pump();
+}
+
+async function cancelTask(task) {
+  task.cancelRequested = true;
+  abortInFlight(task);
+  const session = task.session;
+  setState(task, 'cancelled');
+  removeTask(task);
+  if (session) {
+    clearSession(session.upload_id);
+    await abortSession(session);
+  }
+  pump();
+}
+
+function abortInFlight(task) {
+  if (!task.xhr) return;
+  try { task.xhr.abort(); } catch (_) { /* already settled */ }
+}
+
+function removeTask(task) {
+  const i = tasks.indexOf(task);
+  if (i >= 0) tasks.splice(i, 1);
+  if (task.el) task.el.remove();
+  syncActivity();
+  renderQueueSummary();
+}
+
+function clearFinishedTasks() {
+  for (const task of [...tasks]) {
+    if (task.state === 'done' || task.state === 'failed') removeTask(task);
+  }
+}
+
+btnClearFinished.addEventListener('click', clearFinishedTasks);
+
+// loadFiles() refreshes the file list, the proxy section and the attach-target
+// dropdown. Several tasks finishing within a second of each other would fire
+// it several times over; one refresh answers all of them.
+let filesReloadTimer = null;
+function scheduleFilesReload() {
+  clearTimeout(filesReloadTimer);
+  filesReloadTimer = setTimeout(() => loadFiles(), 300);
+}
+
+// ── Task rows ──
+
+function buildTaskRow(task) {
+  const row = document.createElement('div');
+  row.className = 'task-row';
+
+  const head = document.createElement('div');
+  head.className = 'task-head';
+  const name = document.createElement('span');
+  name.className = 'task-name';
+  name.textContent = taskName(task);          // user-controlled: textContent only
+  const badge = document.createElement('span');
+  badge.className = 'task-badge';
+  const spec = attachSpec(task.mode);
+  badge.textContent = spec ? spec.badge : '📄 文件';
+  const state = document.createElement('span');
+  state.className = 'task-state';
+  head.append(name, badge, state);
+
+  const bar = document.createElement('div');
+  bar.className = 'upload-progress';
+  const fill = document.createElement('div');
+  fill.className = 'upload-progress-bar';
+  fill.style.width = '0%';
+  bar.append(fill);
+
+  const meta = document.createElement('div');
+  meta.className = 'task-meta';
+
+  const actions = document.createElement('div');
+  actions.className = 'task-actions';
+
+  // Its own picker, deliberately not the form's. The form's input is the
+  // enqueue path now, and one file can match two abandoned attempts at the
+  // same upload — so "which task did you mean" has to be answered by which
+  // row was clicked, not inferred.
+  const picker = document.createElement('input');
+  picker.type = 'file';
+  picker.hidden = true;
+  picker.addEventListener('change', () => {
+    const f = picker.files && picker.files[0];
+    picker.value = '';
+    if (!f) return;
+    if (!sessionMatches(task.session, f)) {
+      task.error = '所选文件与这个上传不匹配（名称/大小/修改时间需一致）。';
+      renderTask(task);
+      return;
+    }
+    task.file = f;
+    task.total = f.size;
+    task.error = '';
+    resumeTask(task);
+  });
+
+  row.append(head, bar, meta, actions, picker);
+  task.el = row;
+  task.els = { name, badge, state, fill, meta, actions, picker };
+  taskListEl.append(row);
+  taskListEl.hidden = false;
+  renderTask(task);
+  renderQueueSummary();
+  return row;
+}
+
+function setProgress(task, loaded) {
+  task.loaded = loaded;
+  if (!task.els) return;
+  const pct = task.total > 0 ? Math.min(100, Math.round((loaded / task.total) * 100)) : 100;
+  task.els.fill.style.width = pct + '%';
+  task.els.meta.textContent = metaText(task);
+}
+
+function metaText(task) {
+  if (task.error) return task.error;
+  if (task.state === 'done') return task.note;
+  if (task.state === 'awaiting-overwrite') return `已存在: ${task.dupPath}`;
+  if (task.state === 'needs-file') return '刷新页面后需要重新选择同一个文件才能继续。';
+  const size = `${formatSize(task.loaded)} / ${formatSize(task.total)}`;
+  return task.note ? `${size} · ${task.note}` : size;
+}
+
+function renderTask(task) {
+  if (!task.els) return;
+  const { state, fill, meta, actions } = task.els;
+  task.el.dataset.state = task.state;
+  state.textContent = STATE_TEXT[task.state] || task.state;
+  const pct = task.state === 'done' ? 100
+    : (task.total > 0 ? Math.min(100, Math.round((task.loaded / task.total) * 100)) : 0);
+  fill.style.width = pct + '%';
+  meta.textContent = metaText(task);
+
+  const btns = [];
+  const add = (text, cls, fn) => {
+    const b = document.createElement('button');
+    b.className = cls;
+    b.type = 'button';
+    b.textContent = text;
+    b.addEventListener('click', fn);
+    btns.push(b);
+  };
+
+  if (task.state === 'awaiting-overwrite') {
+    add('覆盖上传', 'btn-rename-confirm', () => {
+      task.overwrite = true;
+      task.error = '';
+      setState(task, 'queued');
+      acquireWakeLock('click');
+      pump();
+    });
+    add('取消', 'btn-rename-cancel', () => cancelTask(task));
+  } else if (task.state === 'needs-file') {
+    add('📂 选择文件', 'btn-file-action', () => task.els.picker.click());
+    add('放弃并清理', 'btn-rename-cancel', () => cancelTask(task));
+  } else if (RESUMABLE_STATES.has(task.state)) {
+    add('▶ 继续', 'btn-rename-confirm', () => resumeTask(task));
+    add('放弃并清理', 'btn-rename-cancel', () => cancelTask(task));
+  } else if (task.state === 'done' || task.state === 'failed') {
+    add('移除', 'btn-file-action', () => removeTask(task));
+  } else if (task.state === 'queued') {
+    add('⏸ 暂停', 'btn-file-action', () => pauseTask(task));
+    add('取消', 'btn-rename-cancel', () => cancelTask(task));
+  } else {
+    // checking / starting / uploading / completing / pausing
+    const b = document.createElement('button');
+    b.className = 'btn-file-action';
+    b.type = 'button';
+    b.textContent = '⏸ 暂停';
+    // Completing has already sent the parts list; interrupting it would leave
+    // the multipart upload consumed with nothing recording that it landed.
+    // checking/starting are round trips with nothing to interrupt — see canPause.
+    b.disabled = !canPause(task);
+    b.addEventListener('click', () => pauseTask(task));
+    btns.push(b);
+    add('取消', 'btn-rename-cancel', () => cancelTask(task));
+  }
+  actions.replaceChildren(...btns);
+}
+
+function renderQueueSummary() {
+  const counts = { running: activeCount(), queued: 0, paused: 0, done: 0, failed: 0 };
+  for (const t of tasks) {
+    if (t.state === 'queued') counts.queued++;
+    else if (t.state === 'paused' || t.state === 'error' || t.state === 'needs-file'
+      || t.state === 'awaiting-overwrite') counts.paused++;
+    else if (t.state === 'done') counts.done++;
+    else if (t.state === 'failed') counts.failed++;
+  }
+  const parts = [];
+  if (counts.running) parts.push(`上传中 ${counts.running}`);
+  if (counts.queued) parts.push(`排队 ${counts.queued}`);
+  if (counts.paused) parts.push(`待处理 ${counts.paused}`);
+  if (counts.done) parts.push(`完成 ${counts.done}`);
+  if (counts.failed) parts.push(`失败 ${counts.failed}`);
+  queueSummaryEl.textContent = parts.length ? parts.join(' · ') : '队列为空';
+  taskListEl.hidden = tasks.length === 0;
+  btnClearFinished.disabled = !(counts.done || counts.failed);
+}
+
+// ── Enqueue ──
+
+// pointerdown is the earliest event carrying transient activation, and it
+// fires well before the click handler's own request. Costs nothing when
+// that one would have succeeded anyway, and widens the window when it
+// wouldn't — the shared in-flight guard means only one request is made.
+uploadBtn.addEventListener('pointerdown', () => {
+  if (selectedFiles.length) acquireWakeLock('pointerdown');
+});
+
+uploadBtn.addEventListener('click', () => {
+  if (!selectedFiles.length) return;
+  // Ask for the lock here, synchronously in the gesture, and not in any of
+  // the async work below — WebKit refuses a request that has outlived its
+  // transient activation, and MDN's examples acquire from a click for
+  // exactly this reason on every engine.
+  acquireWakeLock('click');
+
+  const files = selectedFiles;
+  const mode = uploadMode();
+  const spec = attachSpec(mode);
+
+  if (spec) {
+    const target = attachTargetSelect.value;
+    if (!target) { releaseWakeLock(); showResult(false, '❌ 请先选择上传目标。'); return; }
+    const label = attachLabelInput.value.trim() || spec.fallbackLabel;
+    for (const f of files) enqueue(f, { mode, target, label });
+  } else {
+    const path = customPath.value.trim();
+    // A custom path without a trailing slash is the file's whole name, so N
+    // files would all claim it — N-1 guaranteed collisions. With the slash the
+    // server treats it as a directory prefix and appends each filename.
+    if (files.length > 1 && path && !path.endsWith('/')) {
+      releaseWakeLock();
+      showResult(false, '❌ 一次传多个文件时，自定义路径要以 / 结尾（当作目录），或者留空。');
+      return;
+    }
+    for (const f of files) enqueue(f, { mode: 'file', path });
+  }
+
+  // The queue owns these uploads now, so the form goes back to being empty
+  // and the admin can pick the next batch — in another mode if they like —
+  // while these are still transferring.
+  clearFormSelection();
+  expandUploadSection();
+  showResult(true, files.length === 1
+    ? `📥 已加入队列: ${files[0].name}`
+    : `📥 已加入队列: ${files.length} 个文件`);
+  pump();
+});
+
 // `fatal` marks a failure that resuming cannot fix, so the catch in
-// runUpload aborts and clears instead of offering a Resume that is
+// transfer() aborts and clears instead of offering a 继续 that is
 // guaranteed to fail again.
 function uploadError(message, status, fatal) {
   const err = new Error(message);
@@ -859,7 +1252,7 @@ function isRetryable(err) {
   // 408 is Cloudflare's edge giving up on a request body that arrived too
   // slowly. It is the single most common failure on a large upload over a
   // modest upstream, it is entirely transient, and leaving it out of this
-  // set is what turned every one of them into a manual Resume.
+  // set is what turned every one of them into a manual resume.
   return s === 0 || s === 408 || s === 425 || s === 429 || (s >= 500 && s < 600);
 }
 
@@ -883,13 +1276,18 @@ function waitForOnline(capMs) {
   });
 }
 
-async function uploadChunkWithRetry(session, partNumber, blob, onProgress) {
+async function uploadChunkWithRetry(task, partNumber, blob, onProgress) {
+  const session = task.session;
   let attempt = 0;
   let offlineWaits = 0;
   for (;;) {
     try {
-      return await uploadChunk(session.upload_id, session.key, partNumber, blob, onProgress);
+      return await uploadChunk(task, session.upload_id, session.key, partNumber, blob, onProgress);
     } catch (err) {
+      // First, before isRetryable: an aborted XHR reports status 0, exactly
+      // as a dropped connection does, so without this the retry loop would
+      // immediately re-send the part the admin just paused or cancelled.
+      throwIfInterrupted(task);
       if (err.status === 401 || err.status === 403) {
         throw uploadError('管理会话已过期，请刷新页面后继续上传。', err.status);
       }
@@ -901,15 +1299,19 @@ async function uploadChunkWithRetry(session, partNumber, blob, onProgress) {
       // server that is genuinely broken still gives up on schedule.
       if (navigator.onLine === false && offlineWaits < MAX_OFFLINE_WAITS) {
         offlineWaits++;
-        uploadBtn.textContent = `📴 分片 ${partNumber} 等待网络恢复...`;
+        task.note = `📴 分片 ${partNumber} 等待网络恢复…`;
+        renderTask(task);
         await waitForOnline(OFFLINE_WAIT_MS);
+        throwIfInterrupted(task);
         continue;
       }
 
       attempt++;
       if (attempt >= PART_RETRIES) throw err;
-      uploadBtn.textContent = `⏳ 分片 ${partNumber} 重试 ${attempt}/${PART_RETRIES - 1}...`;
+      task.note = `分片 ${partNumber} 重试 ${attempt}/${PART_RETRIES - 1}…`;
+      renderTask(task);
       await sleep(1000 * Math.pow(2, attempt - 1));
+      throwIfInterrupted(task);
     }
   }
 }
@@ -949,7 +1351,7 @@ async function uploadLanded(session) {
     // it hangs off. Asking the wrong oracle reports every *successful* attach
     // upload as failed, and complete is the one step that must not be blindly
     // retried: the multipart upload is already consumed, so two reported
-    // failures send the admin to Discard over an object sitting in the bucket.
+    // failures send the admin to 放弃 over an object sitting in the bucket.
     // Hence `spec.targetParam` — a hardcoded `?file_path=` here would query the
     // announcement listing with a param it rejects, i.e. 400 on every reconcile.
     const spec = attachSpec(session.mode);
@@ -972,9 +1374,13 @@ async function uploadLanded(session) {
   }
 }
 
-function uploadChunk(uploadId, key, partNumber, blob, onProgress) {
+function uploadChunk(task, uploadId, key, partNumber, blob, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    // Held on the task so pause and cancel can abort it. Cleared on settle so
+    // a later abort can never reach a socket that has already closed.
+    task.xhr = xhr;
+    const settle = () => { if (task.xhr === xhr) task.xhr = null; };
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable && onProgress) {
@@ -983,6 +1389,7 @@ function uploadChunk(uploadId, key, partNumber, blob, onProgress) {
     });
 
     xhr.addEventListener('load', () => {
+      settle();
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           resolve(JSON.parse(xhr.responseText));
@@ -996,9 +1403,12 @@ function uploadChunk(uploadId, key, partNumber, blob, onProgress) {
       }
     });
 
-    // status 0 on both: no response ever arrived, so this is retryable.
-    xhr.addEventListener('error', () => reject(uploadError(`分片 ${partNumber}: 网络错误`, 0)));
-    xhr.addEventListener('timeout', () => reject(uploadError(`分片 ${partNumber}: 超时`, 0)));
+    // status 0 on all three: no response ever arrived. A dropped connection
+    // and a timeout are retryable; `abort` is our own pause or cancel, and
+    // uploadChunkWithRetry checks the task's intent before the retry test.
+    xhr.addEventListener('error', () => { settle(); reject(uploadError(`分片 ${partNumber}: 网络错误`, 0)); });
+    xhr.addEventListener('timeout', () => { settle(); reject(uploadError(`分片 ${partNumber}: 超时`, 0)); });
+    xhr.addEventListener('abort', () => { settle(); reject(uploadError(`分片 ${partNumber}: 已中止`, 0)); });
 
     const params = new URLSearchParams({
       upload_id: uploadId,
@@ -1013,6 +1423,14 @@ function uploadChunk(uploadId, key, partNumber, blob, onProgress) {
     xhr.send(blob);
   });
 }
+
+// Stored sessions outlive the page, so surface them as tasks on load. There
+// is no File yet, so each one asks for its own file back rather than
+// resuming outright.
+migrateLegacySession();
+for (const s of loadAllSessions()) adoptSession(s);
+renderQueueSummary();
+
 
 function showResult(success, msg) {
   uploadResult.hidden = false;
