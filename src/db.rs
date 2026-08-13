@@ -1229,3 +1229,319 @@ pub async fn delete_clips_by_identity(
         .await;
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) as u32)
 }
+
+// ── Announcements ──
+//
+// The one feature here that names no file: an announcement joins nothing, so
+// it is absent from `repoint_file_path` and from every `delete_*_for_path`
+// function by design, not by omission.
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnnouncementRecord {
+    pub id: i32,
+    pub title: String,
+    pub body: String,
+    /// Ordering only — see `is_published` for visibility. Any number of rows
+    /// may carry it.
+    pub pinned: i32,
+    pub is_published: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AnnouncementMediaRecord {
+    pub announcement_id: i32,
+    pub key: String,
+    pub label: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+    pub uploaded_at: String,
+}
+
+const ANNOUNCEMENT_COLUMNS: &str =
+    "id, title, body, pinned, is_published, created_at, updated_at";
+const ANNOUNCEMENT_MEDIA_COLUMNS: &str =
+    "announcement_id, key, label, filename, content_type, size, uploaded_at";
+
+/// The feed's sort, shared by the public and admin listings so the admin sees
+/// the order viewers get. Pinned first, then newest — `pinned` re-sorts and
+/// never filters, which is what lets any number of rows carry it.
+const ANNOUNCEMENT_ORDER: &str = "ORDER BY pinned DESC, created_at DESC";
+
+/// List announcements, newest-with-pinned-first.
+///
+/// `published_only` is the *only* visibility gate. Everything else about an
+/// announcement — pinning included — is presentation.
+pub async fn list_announcements(
+    ctx: &worker::RouteContext<()>,
+    published_only: bool,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<AnnouncementRecord>> {
+    let db = ctx.d1("DB")?;
+    let where_clause = if published_only {
+        "WHERE is_published = 1 "
+    } else {
+        ""
+    };
+    let result = db
+        .prepare(&format!(
+            "SELECT {ANNOUNCEMENT_COLUMNS} FROM announcements {where_clause}\
+             {ANNOUNCEMENT_ORDER} LIMIT ? OFFSET ?"
+        ))
+        .bind(&[
+            JsValue::from(&D1Type::Integer(limit as i32)),
+            JsValue::from(&D1Type::Integer(offset as i32)),
+        ])?
+        .all()
+        .await?;
+    result.results::<AnnouncementRecord>()
+}
+
+/// Every media row belonging to the page `list_announcements` would return.
+///
+/// Deliberately one statement for the whole page rather than one per row: the
+/// gallery's first paint fetches the feed, and an announcement-per-request fan
+/// out would put N round trips on it. The subquery repeats the listing's own
+/// LIMIT/OFFSET so the two answers describe exactly the same page — widening it
+/// to "all published" would ship media for announcements the caller never got.
+pub async fn list_announcement_media_page(
+    ctx: &worker::RouteContext<()>,
+    published_only: bool,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<AnnouncementMediaRecord>> {
+    let db = ctx.d1("DB")?;
+    let where_clause = if published_only {
+        "WHERE is_published = 1 "
+    } else {
+        ""
+    };
+    let result = db
+        .prepare(&format!(
+            "SELECT {ANNOUNCEMENT_MEDIA_COLUMNS} FROM announcement_media \
+             WHERE announcement_id IN (SELECT id FROM announcements {where_clause}\
+             {ANNOUNCEMENT_ORDER} LIMIT ? OFFSET ?) ORDER BY uploaded_at ASC"
+        ))
+        .bind(&[
+            JsValue::from(&D1Type::Integer(limit as i32)),
+            JsValue::from(&D1Type::Integer(offset as i32)),
+        ])?
+        .all()
+        .await?;
+    result.results::<AnnouncementMediaRecord>()
+}
+
+pub async fn get_announcement(
+    ctx: &worker::RouteContext<()>,
+    id: i32,
+) -> Result<Option<AnnouncementRecord>> {
+    let db = ctx.d1("DB")?;
+    db.prepare(&format!(
+        "SELECT {ANNOUNCEMENT_COLUMNS} FROM announcements WHERE id = ?"
+    ))
+    .bind(&[JsValue::from(&D1Type::Integer(id))])?
+    .first::<AnnouncementRecord>(None)
+    .await
+}
+
+/// Insert an announcement and hand back its new id.
+///
+/// The id is read from D1's own `last_row_id` rather than a follow-up SELECT:
+/// the caller needs it to attach media, and any "newest row" query would be a
+/// race against a second admin tab.
+pub async fn insert_announcement(
+    ctx: &worker::RouteContext<()>,
+    title: &str,
+    body: &str,
+    pinned: bool,
+    is_published: bool,
+) -> Result<i64> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare(
+            "INSERT INTO announcements (title, body, pinned, is_published, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))",
+        )
+        .bind(&[
+            JsValue::from(&D1Type::Text(title)),
+            JsValue::from(&D1Type::Text(body)),
+            JsValue::from(&D1Type::Integer(pinned as i32)),
+            JsValue::from(&D1Type::Integer(is_published as i32)),
+        ])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.last_row_id).unwrap_or(0))
+}
+
+/// Rewrite an announcement's text.
+///
+/// Split from `set_announcement_flags` on purpose. The pin and publish toggles
+/// live in a list the admin may have loaded minutes ago; if they carried the
+/// whole record, one click would write that stale copy back over an edit made
+/// in the editor since. Each writer touches only the columns it actually owns.
+pub async fn update_announcement(
+    ctx: &worker::RouteContext<()>,
+    id: i32,
+    title: &str,
+    body: &str,
+) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare(
+            "UPDATE announcements SET title = ?, body = ?, updated_at = datetime('now') \
+             WHERE id = ?",
+        )
+        .bind(&[
+            JsValue::from(&D1Type::Text(title)),
+            JsValue::from(&D1Type::Text(body)),
+            JsValue::from(&D1Type::Integer(id)),
+        ])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}
+
+/// Set the two flags. See `update_announcement` for why this is its own write.
+///
+/// `updated_at` deliberately does not move: it is the text's timestamp, and the
+/// feed shows it. Pinning an old announcement should not make it look rewritten.
+pub async fn set_announcement_flags(
+    ctx: &worker::RouteContext<()>,
+    id: i32,
+    pinned: bool,
+    is_published: bool,
+) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare("UPDATE announcements SET pinned = ?, is_published = ? WHERE id = ?")
+        .bind(&[
+            JsValue::from(&D1Type::Integer(pinned as i32)),
+            JsValue::from(&D1Type::Integer(is_published as i32)),
+            JsValue::from(&D1Type::Integer(id)),
+        ])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}
+
+/// Drop the announcement row itself. Its media rows and their R2 objects are
+/// the route's job, in that order — see `DELETE /admin/api/announcements/{id}`.
+pub async fn delete_announcement(ctx: &worker::RouteContext<()>, id: i32) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare("DELETE FROM announcements WHERE id = ?")
+        .bind(&[JsValue::from(&D1Type::Integer(id))])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}
+
+pub async fn insert_announcement_media(
+    ctx: &worker::RouteContext<()>,
+    announcement_id: i32,
+    key: &str,
+    label: &str,
+    filename: &str,
+    content_type: &str,
+    size: i64,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare(
+        "INSERT INTO announcement_media \
+         (announcement_id, key, label, filename, content_type, size, uploaded_at) \
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
+    )
+    .bind(&[
+        JsValue::from(&D1Type::Integer(announcement_id)),
+        JsValue::from(&D1Type::Text(key)),
+        JsValue::from(&D1Type::Text(label)),
+        JsValue::from(&D1Type::Text(filename)),
+        JsValue::from(&D1Type::Text(content_type)),
+        // Real, not Integer — same rule as everywhere else here. An
+        // announcement can carry a teaser video, which is not small.
+        JsValue::from(&D1Type::Real(size as f64)),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
+pub async fn list_announcement_media(
+    ctx: &worker::RouteContext<()>,
+    announcement_id: i32,
+) -> Result<Vec<AnnouncementMediaRecord>> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare(&format!(
+            "SELECT {ANNOUNCEMENT_MEDIA_COLUMNS} FROM announcement_media \
+             WHERE announcement_id = ? ORDER BY uploaded_at ASC"
+        ))
+        .bind(&[JsValue::from(&D1Type::Integer(announcement_id))])?
+        .all()
+        .await?;
+    result.results::<AnnouncementMediaRecord>()
+}
+
+/// Every R2 key an announcement owns.
+///
+/// Same role as `list_proxy_keys` / `list_attachment_keys`: once the
+/// announcement row is gone nothing can enumerate these objects again, so the
+/// delete route has to collect them before it drops anything.
+pub async fn list_announcement_media_keys(
+    ctx: &worker::RouteContext<()>,
+    announcement_id: i32,
+) -> Result<Vec<String>> {
+    Ok(list_announcement_media(ctx, announcement_id)
+        .await?
+        .into_iter()
+        .map(|m| m.key)
+        .collect())
+}
+
+/// Drop an announcement's media rows (the R2 objects are the caller's job).
+pub async fn delete_announcement_media_for_id(
+    ctx: &worker::RouteContext<()>,
+    announcement_id: i32,
+) -> Result<()> {
+    let db = ctx.d1("DB")?;
+    db.prepare("DELETE FROM announcement_media WHERE announcement_id = ?")
+        .bind(&[JsValue::from(&D1Type::Integer(announcement_id))])?
+        .run()
+        .await?;
+    Ok(())
+}
+
+/// Does a media row exist for this R2 key?
+///
+/// The same guard as `proxy_exists` / `attachment_exists`, for the same reason:
+/// `DELETE /admin/api/announcement-media?key=` deletes an R2 object, and
+/// without the lookup `?key=uploads/…/video.mp4` would delete a gallery file's
+/// bytes and leave its `files` row pointing at nothing.
+pub async fn announcement_media_exists(
+    ctx: &worker::RouteContext<()>,
+    key: &str,
+) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let found = db
+        .prepare("SELECT COUNT(*) AS cnt FROM announcement_media WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(key))])?
+        .first::<i32>(Some("cnt"))
+        .await?;
+    Ok(found.unwrap_or(0) > 0)
+}
+
+pub async fn delete_announcement_media_by_key(
+    ctx: &worker::RouteContext<()>,
+    key: &str,
+) -> Result<bool> {
+    let db = ctx.d1("DB")?;
+    let result = db
+        .prepare("DELETE FROM announcement_media WHERE key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(key))])?
+        .run()
+        .await?;
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+}

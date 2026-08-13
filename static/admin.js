@@ -15,17 +15,26 @@ let selectedFile = null;
 // ── Upload mode ──
 // 'file' uploads a new object; 'proxy' attaches a low-quality playback source
 // to an existing one; 'attachment' attaches a downloadable related file
-// (subtitles, transcripts). Everything between /start and /complete is
-// identical — /admin/api/upload/part serves all three — so they share this
-// whole uploader, resume and wake lock included.
+// (subtitles, transcripts); 'announcement' attaches an image, video or PDF to
+// an announcement. Everything between /start and /complete is identical —
+// /admin/api/upload/part serves all four — so they share this whole uploader,
+// resume and wake lock included.
 //
 // Every mode test goes through `attachSpec()`, never a bare `=== 'proxy'`.
 // With only two modes, `=== 'proxy'` doubled as "not a plain file upload";
 // a third mode makes every such test silently reclassify attachments as file
 // uploads, and in `uploadLanded` that mistake costs real data. A legacy
 // session with no `mode` at all still resolves to null, i.e. a file upload.
+//
+// `targetParam` is what an attach mode is bound *to*, and it is not always a
+// file: proxies and attachments hang off `files.path`, announcement media off
+// an `announcements.id`. Every request that carries the target — /start,
+// /complete, the listing behind `uploadLanded` — names it through this field,
+// so a hardcoded `?file_path=` anywhere is a bug that only shows up in the
+// announcement mode, and only as a reconcile failure.
 const ATTACH_SPECS = {
   proxy: {
+    targetParam: 'file_path',
     title: '📹 上传代理',
     accept: 'video/*,audio/*',
     zoneHint: '低质量视频或纯音频，用于快速预览和切片',
@@ -45,6 +54,7 @@ const ATTACH_SPECS = {
     okPrefix: '✅ 代理上传成功!',
   },
   attachment: {
+    targetParam: 'file_path',
     title: '📎 上传关联文件',
     // Deliberately unrestricted: subtitles arrive as .srt/.ass/.vtt/.lrc and
     // the OS file picker's type map for those is unreliable.
@@ -63,6 +73,27 @@ const ATTACH_SPECS = {
     listField: 'attachments',
     okPrefix: '✅ 关联文件上传成功!',
   },
+  announcement: {
+    targetParam: 'announcement_id',
+    title: '📢 上传公告附件',
+    // Unrestricted for the same reason as attachments, and because the two
+    // kinds an announcement carries are deliberately different: a poster or
+    // teaser the feed shows inline, and a document it offers as a download.
+    accept: '',
+    zoneHint: '图片、视频会显示在公告里，PDF 等文件作为下载提供',
+    targetLabel: '🎯 属于哪条公告',
+    targetHint: '先在「📢 公告」区新建公告，再回到这里为它上传附件。',
+    labelLabel: '🏷 附件说明',
+    labelHint: '显示在图片下方或下载按钮上，例如「直播日程表」。',
+    labelPlaceholder: '例如: 日程表、场照',
+    labelMax: 48,
+    fallbackLabel: '附件',
+    startUrl: '/admin/api/announcement/start',
+    completeUrl: '/admin/api/announcement/complete',
+    listUrl: '/admin/api/announcement-media',
+    listField: 'media',
+    okPrefix: '✅ 公告附件上传成功!',
+  },
 };
 
 function uploadMode() {
@@ -76,10 +107,15 @@ function attachSpec(mode) {
   return ATTACH_SPECS[mode] || null;
 }
 
-// A session stored by the deployed two-mode version carries proxyFilePath /
-// proxyLabel. Read through these so an upload already in flight when this
-// version ships still resumes and completes.
-function sessionAttachPath(s) { return s.attachFilePath || s.proxyFilePath || ''; }
+// The token this upload is attached to — a `files.path` in the proxy and
+// attachment modes, an `announcements.id` in the announcement one. Which query
+// param it travels under is `spec.targetParam`'s business, not this function's.
+//
+// The stored field keeps its `attachFilePath` name on purpose: a session
+// written by the deployed version is still readable, and so is one written by
+// the two-mode version before it (`proxyFilePath`). Renaming the field would
+// strand an upload that was in flight when this version shipped.
+function sessionAttachTarget(s) { return s.attachFilePath || s.proxyFilePath || ''; }
 function sessionAttachLabel(s) { return s.attachLabel || s.proxyLabel || ''; }
 
 function applyUploadMode() {
@@ -97,6 +133,11 @@ function applyUploadMode() {
     attachLabelInput.placeholder = spec.labelPlaceholder;
     attachLabelInput.maxLength = spec.labelMax;
   }
+  // The target list is per-mode — files for 代理/关联文件, announcements for
+  // 公告附件 — so it has to be rebuilt here, not just when a listing loads.
+  // Without this the select keeps the previous mode's options and the first
+  // upload posts a file path as an `announcement_id`.
+  renderAttachTargets();
   if (!selectedFile) {
     document.getElementById('upload-zone-hint').textContent =
       spec ? spec.zoneHint : '支持 JPG, PNG, GIF, MP4, WEBM, MP3, WAV 等';
@@ -415,15 +456,16 @@ uploadBtn.addEventListener('click', () => {
   const spec = attachSpec(mode);
   if (spec) {
     const target = attachTargetSelect.value;
-    if (!target) { releaseWakeLock(); showResult(false, '❌ 请先选择目标文件。'); return; }
+    if (!target) { releaseWakeLock(); showResult(false, '❌ 请先选择上传目标。'); return; }
     // No check-key: that endpoint tests `files.path` for collisions, and
-    // everything attached to a file deliberately has no uniqueness on
-    // file_path (many proxies and many attachments per file is the point).
-    // Running it would raise the overwrite dialog over an unrelated file,
-    // and overwrite means nothing here.
+    // everything attached deliberately has no uniqueness on its target (many
+    // proxies per file, many attachments per file, many media per announcement
+    // is the point). Running it would raise the overwrite dialog over an
+    // unrelated file, and overwrite means nothing here. In the announcement
+    // mode it would not even be asking about the right table.
     doMultipartUpload(selectedFile, '', false, {
       mode,
-      filePath: target,
+      target,
       label: attachLabelInput.value.trim() || spec.fallbackLabel,
     });
     return;
@@ -513,7 +555,10 @@ async function doMultipartUpload(file, path, overwrite, attachTarget) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            file_path: attachTarget.filePath,
+            // Computed key: the target is a file path in two modes and an
+            // announcement id in the third, and the server reads whichever
+            // name its own table is keyed on.
+            [spec.targetParam]: attachTarget.target,
             filename: file.name,
             content_type: contentType,
             label: attachTarget.label,
@@ -551,7 +596,8 @@ async function doMultipartUpload(file, path, overwrite, attachTarget) {
       // before attach modes existed (no `mode`, or `mode: 'file'`) resolves to
       // a plain file upload without a special case.
       mode: attachTarget ? attachTarget.mode : 'file',
-      attachFilePath: attachTarget ? attachTarget.filePath : undefined,
+      // Legacy field name, read back through `sessionAttachTarget()` — see there.
+      attachFilePath: attachTarget ? attachTarget.target : undefined,
       attachLabel: attachTarget ? attachTarget.label : undefined,
       parts: [],
       file: { name: file.name, size: file.size, lastModified: file.lastModified },
@@ -652,11 +698,11 @@ async function runUpload(file, session) {
             body: JSON.stringify({
               upload_id: session.upload_id,
               key: session.key,
-              file_path: sessionAttachPath(session),
+              [spec.targetParam]: sessionAttachTarget(session),
               label: sessionAttachLabel(session),
-              // Ignored by /proxy/complete. An attachment is downloaded rather
-              // than played, and the storage key is opaque, so its display name
-              // has to be carried across explicitly.
+              // Ignored by /proxy/complete. An attachment and an announcement's
+              // media are downloaded rather than played, and the storage key is
+              // opaque, so the display name has to be carried across explicitly.
               filename: session.file.name,
               content_type: session.contentType,
               parts: session.parts,
@@ -718,12 +764,13 @@ async function runUpload(file, session) {
     clearSession();
     resumeFile = null;
     resumeBanner.hidden = true;
-    // An attached upload has no display path of its own — it belongs to a
-    // file, and both attach completions return `file_path`, not `path`.
-    // Reading `.path` here is what printed "→ undefined".
+    // An attached upload has no display path of its own — it belongs to a file
+    // or an announcement, and no attach completion returns `path`. Reading
+    // `.path` here is what printed "→ undefined". The session's own target is
+    // the fallback, and the only thing the announcement mode can print.
     const doneSpec = attachSpec(session.mode);
     showResult(true, doneSpec
-      ? `${doneSpec.okPrefix} ${sessionAttachLabel(session)} → ${completeData.file_path || sessionAttachPath(session)} (${formatSize(completeData.size)})`
+      ? `${doneSpec.okPrefix} ${sessionAttachLabel(session)} → ${completeData.file_path || sessionAttachTarget(session)} (${formatSize(completeData.size)})`
       : `✅ 上传成功! ${completeData.path} (${formatSize(completeData.size)})`);
     customPath.value = '';
     selectedFile = null;
@@ -874,16 +921,19 @@ async function fetchWithRetry(url, opts, attempts = 3) {
 async function uploadLanded(session) {
   try {
     // An attached upload is never in the file listing — it lives in
-    // proxy_videos / file_attachments, keyed by the path it belongs to.
-    // Asking the wrong oracle reports every *successful* attach upload as
-    // failed, and complete is the one step that must not be blindly retried:
-    // the multipart upload is already consumed, so two reported failures send
-    // the admin to Discard over an object that is sitting in the bucket.
+    // proxy_videos / file_attachments / announcement_media, keyed by whatever
+    // it hangs off. Asking the wrong oracle reports every *successful* attach
+    // upload as failed, and complete is the one step that must not be blindly
+    // retried: the multipart upload is already consumed, so two reported
+    // failures send the admin to Discard over an object sitting in the bucket.
+    // Hence `spec.targetParam` — a hardcoded `?file_path=` here would query the
+    // announcement listing with a param it rejects, i.e. 400 on every reconcile.
     const spec = attachSpec(session.mode);
     if (spec) {
-      const filePath = sessionAttachPath(session);
+      const filePath = sessionAttachTarget(session);
       const resp = await fetchWithRetry(
-        spec.listUrl + '?file_path=' + encodeURIComponent(filePath), undefined, 2);
+        spec.listUrl + '?' + spec.targetParam + '=' + encodeURIComponent(filePath),
+        undefined, 2);
       if (!resp.ok) return null;
       const data = await resp.json();
       const hit = (data[spec.listField] || []).find(r => r.key === session.key);
@@ -1432,29 +1482,48 @@ function updateProxySection(files) {
 // refresh so uploading does not reset the target you just used.
 function renderAttachTargets() {
   const previous = attachTargetSelect.value;
-  // Built with `new Option`, not innerHTML: paths are user-controlled.
-  const opts = proxyFileData.map(f => {
-    const path = f.path || f.key;
-    return new Option(path, path);
-  });
+  // One select, two populations, picked by mode: 代理 and 关联文件 attach to a
+  // file, 公告附件 attaches to an announcement. Refilled on every mode change
+  // (applyUploadMode calls this) — leaving a file path selected while the
+  // announcement mode is active would post it as an `announcement_id`.
+  const forAnnouncement = uploadMode() === 'announcement';
+  // Built with `new Option`, not innerHTML: paths and titles are user-typed.
+  const opts = forAnnouncement
+    ? noticeData.map(a => new Option(noticeOptionText(a), String(a.id)))
+    : proxyFileData.map(f => new Option(f.path || f.key, f.path || f.key));
+  const stillThere = forAnnouncement
+    ? noticeData.some(a => String(a.id) === previous)
+    : proxyFileData.some(f => (f.path || f.key) === previous);
+
   if (!opts.length) {
-    attachTargetSelect.replaceChildren(new Option('（没有可关联的视频/音频文件）', ''));
+    attachTargetSelect.replaceChildren(new Option(forAnnouncement
+      ? '（还没有公告，请先在「📢 公告」区新建）'
+      : '（没有可关联的视频/音频文件）', ''));
   } else {
     attachTargetSelect.replaceChildren(...opts);
-    if (previous && proxyFileData.some(f => (f.path || f.key) === previous)) {
-      attachTargetSelect.value = previous;
-    }
+    if (previous && stillThere) attachTargetSelect.value = previous;
   }
   refreshUploadButton();
 }
 
-// Both lists are the same shape — label · size, delete, keyed off the same
-// file_path — so one renderer serves them, driven by the same ATTACH_SPECS the
-// uploader uses. `noun` and `icon` are the only per-kind UI text.
+// An announcement's title is optional, so the option text falls back to the
+// first line of the body and then to the id — a dropdown of blank rows is
+// unusable, and the id is the one thing that always exists.
+function noticeOptionText(a) {
+  const head = (a.title || a.body || '').split('\n')[0].trim();
+  const shown = head.length > 40 ? head.slice(0, 40) + '…' : head;
+  return (a.is_published ? '' : '[草稿] ') + (shown || '(无标题)') + ' #' + a.id;
+}
+
+// All three lists are the same shape — label · size, delete, keyed off the one
+// thing they hang from — so one renderer serves them, driven by the same
+// ATTACH_SPECS the uploader uses. `noun` and `icon` are the only per-kind UI
+// text; `spec.targetParam` is what makes "the one thing" a file path here and
+// an announcement id there.
 const ATTACH_VIEWS = {
   // `detachable` only on proxies: an attachment is a download bound to a file
   // (subtitles for *that* video), not an encode of it, so there is no standalone
-  // file for it to become.
+  // file for it to become. Announcement media likewise.
   proxy: {
     spec: ATTACH_SPECS.proxy, icon: '📹', noun: '代理', detachable: true,
     addHint: '在上方「📹 代理」模式中添加，或在文件列表用「🔗 归入」把已上传的文件收进来。',
@@ -1463,27 +1532,35 @@ const ATTACH_VIEWS = {
     spec: ATTACH_SPECS.attachment, icon: '📎', noun: '关联文件',
     addHint: '在上方「📎 关联文件」模式中添加。',
   },
+  announcement: {
+    spec: ATTACH_SPECS.announcement, icon: '📎', noun: '附件',
+    addHint: '在上方「📢 公告附件」模式中添加。',
+  },
 };
 
-// Fetched per file, on demand. Eagerly counting them fired one admin request
+// Fetched per target, on demand. Eagerly counting them fired one admin request
 // per video on every listing refresh — /admin/api/files returns up to 1000 rows.
-async function toggleAttachDetail(view, file, panel, btn) {
+//
+// `target` is the token the list is keyed on (a display path, or an
+// announcement id), resolved by the caller — this function never reaches into a
+// record to find it, because the three callers hold three different shapes.
+async function toggleAttachDetail(view, target, panel, btn) {
   if (!panel.hidden) { panel.hidden = true; btn.textContent = view.icon + ' ' + view.noun; return; }
   panel.hidden = false;
   btn.textContent = view.icon + ' 收起';
   panel.textContent = '加载中...';
-  const path = file.path || file.key;
   try {
-    const resp = await fetch(view.spec.listUrl + '?file_path=' + encodeURIComponent(path));
+    const resp = await fetch(
+      view.spec.listUrl + '?' + view.spec.targetParam + '=' + encodeURIComponent(target));
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const rows = (await resp.json())[view.spec.listField] || [];
-    renderAttachDetail(view, file, panel, btn, rows);
+    renderAttachDetail(view, target, panel, btn, rows);
   } catch (err) {
     panel.textContent = '❌ 加载失败: ' + err.message;
   }
 }
 
-function renderAttachDetail(view, file, panel, btn, records) {
+function renderAttachDetail(view, target, panel, btn, records) {
   const rows = records.map(p => {
     const line = document.createElement('div');
     line.className = 'admin-subrow';
@@ -1507,7 +1584,7 @@ function renderAttachDetail(view, file, panel, btn, records) {
       if (resp.ok) {
         panel.hidden = true;
         btn.textContent = view.icon + ' ' + view.noun;
-        toggleAttachDetail(view, file, panel, btn);
+        toggleAttachDetail(view, target, panel, btn);
       } else alert('删除失败');
     });
     if (view.detachable) {
@@ -1518,7 +1595,7 @@ function renderAttachDetail(view, file, panel, btn, records) {
       out.addEventListener('click', () => detachProxy(p, () => {
         panel.hidden = true;
         btn.textContent = view.icon + ' ' + view.noun;
-        toggleAttachDetail(view, file, panel, btn);
+        toggleAttachDetail(view, target, panel, btn);
       }));
       line.append(label, out, del);
     } else {
@@ -1559,7 +1636,7 @@ function renderProxyRows() {
       const btn = document.createElement('button');
       btn.className = 'btn-file-action';
       btn.textContent = view.icon + ' ' + view.noun;
-      btn.addEventListener('click', () => toggleAttachDetail(view, f, panel, btn));
+      btn.addEventListener('click', () => toggleAttachDetail(view, path, panel, btn));
       row.append(btn);
       wrap.append(panel);
     }
@@ -1784,6 +1861,235 @@ $('btn-batch-delete').addEventListener('click', async () => {
     $('batch-result').textContent = '❌ 网络错误: ' + err.message;
   }
 });
+
+// ── Announcements ──
+//
+// Create is deliberately its own step rather than one save that also uploads:
+// media hangs off an announcement id, so the row has to exist first. 立即发布
+// unchecked is what makes that sequence safe — write it, attach the poster,
+// then publish — which is why the flags are on the editor and not only on the
+// rows.
+let noticeData = [];
+let noticeEditingId = null;
+
+$('btn-load-notices').addEventListener('click', loadNotices);
+
+async function loadNotices() {
+  const btn = $('btn-load-notices');
+  btn.disabled = true;
+  btn.textContent = '⏳ ...';
+  try {
+    const resp = await fetch('/admin/api/announcements');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    noticeData = data.announcements || [];
+    renderNotices();
+    // The upload section's target dropdown is fed from this same array, so an
+    // announcement created a moment ago is uploadable without a page reload.
+    renderAttachTargets();
+  } catch (err) {
+    $('notice-list').replaceChildren(mkNote('admin-error', '❌ 加载失败: ' + err.message));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 加载公告';
+  }
+}
+
+function renderNotices() {
+  const published = noticeData.filter(a => a.is_published).length;
+  $('notice-count').textContent = noticeData.length
+    ? `共 ${noticeData.length} 条 · ${published} 条已发布 · ${noticeData.filter(a => a.pinned).length} 条置顶`
+    : '';
+  if (!noticeData.length) {
+    $('notice-list').replaceChildren(mkNote('admin-empty', '还没有公告。'));
+    return;
+  }
+  $('notice-list').replaceChildren(...noticeData.map(noticeRow));
+}
+
+// Every string here is admin-typed and goes in through textContent. Same rule
+// as the rest of this file: the announcement body renders on the gallery, on
+// the same origin as /admin, so innerHTML anywhere in this path would be a
+// stored-XSS hole that the admin writes into themselves.
+function noticeRow(a) {
+  const wrap = document.createElement('div');
+  const row = document.createElement('div');
+  row.className = 'admin-row';
+
+  const info = document.createElement('div');
+  info.className = 'admin-row-info';
+  const head = document.createElement('div');
+  head.className = 'admin-row-name';
+  head.textContent = a.title || '(无标题)';
+  if (a.pinned) head.append(mkNote('notice-badge pin', '📌 置顶'));
+  if (!a.is_published) head.append(mkNote('notice-badge draft', '草稿'));
+  const preview = document.createElement('div');
+  preview.className = 'admin-row-sub notice-preview';
+  preview.textContent = a.body || '';
+  const meta = document.createElement('div');
+  meta.className = 'admin-row-sub';
+  meta.textContent = `#${a.id} · ${a.created_at}`
+    + (a.updated_at && a.updated_at !== a.created_at ? ` · 编辑于 ${a.updated_at}` : '');
+  info.append(head, preview, meta);
+
+  const acts = document.createElement('div');
+  acts.className = 'admin-row-actions';
+
+  const edit = document.createElement('button');
+  edit.className = 'btn-file-action btn-rename';
+  edit.textContent = '✏️ 编辑';
+  edit.addEventListener('click', () => startNoticeEdit(a));
+
+  const pin = document.createElement('button');
+  pin.className = 'btn-file-action';
+  pin.textContent = a.pinned ? '📌 取消置顶' : '📌 置顶';
+  // Only the flag it owns is sent. The editor owns title/body, and this row may
+  // have been on screen for a while — posting the whole record from here would
+  // write a stale copy of the text back over an edit made since.
+  pin.addEventListener('click', () => setNoticeFlags(a, { pinned: !a.pinned }));
+
+  const pub = document.createElement('button');
+  pub.className = 'btn-file-action';
+  pub.textContent = a.is_published ? '🙈 取消发布' : '👁 发布';
+  pub.addEventListener('click', () => setNoticeFlags(a, { is_published: !a.is_published }));
+
+  const view = ATTACH_VIEWS.announcement;
+  const panel = document.createElement('div');
+  panel.hidden = true;
+  panel.className = 'admin-subpanel';
+  const media = document.createElement('button');
+  media.className = 'btn-file-action';
+  media.textContent = view.icon + ' ' + view.noun;
+  media.addEventListener('click', () => toggleAttachDetail(view, String(a.id), panel, media));
+
+  const del = document.createElement('button');
+  del.className = 'btn-file-action danger';
+  del.textContent = '🗑 删除';
+  del.addEventListener('click', () => deleteNotice(a));
+
+  acts.append(edit, pin, pub, media, del);
+  row.append(info, acts);
+  wrap.append(row, panel);
+  return wrap;
+}
+
+function startNoticeEdit(a) {
+  noticeEditingId = a.id;
+  $('notice-title').value = a.title || '';
+  $('notice-body').value = a.body || '';
+  $('notice-pinned').checked = !!a.pinned;
+  $('notice-published').checked = !!a.is_published;
+  $('btn-notice-save').textContent = '✅ 保存修改 #' + a.id;
+  $('btn-notice-cancel').hidden = false;
+  $('notice-result').hidden = true;
+  $('notice-title').scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+function resetNoticeEditor() {
+  noticeEditingId = null;
+  $('notice-title').value = '';
+  $('notice-body').value = '';
+  $('notice-pinned').checked = false;
+  $('notice-published').checked = true;
+  $('btn-notice-save').textContent = '✅ 发布公告';
+  $('btn-notice-cancel').hidden = true;
+}
+
+$('btn-notice-cancel').addEventListener('click', () => {
+  resetNoticeEditor();
+  $('notice-result').hidden = true;
+});
+
+$('btn-notice-save').addEventListener('click', async () => {
+  const title = $('notice-title').value.trim();
+  // Not trimmed: the feed renders the body with `white-space: pre-wrap`, so the
+  // admin's own line breaks and indentation are content. Only the both-empty
+  // check looks past the whitespace.
+  const body = $('notice-body').value;
+  if (!title && !body.trim()) {
+    showNoticeResult(false, '❌ 标题和正文不能都为空。');
+    return;
+  }
+
+  const editing = noticeEditingId;
+  const btn = $('btn-notice-save');
+  const restore = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ 保存中...';
+  try {
+    const resp = await fetch(
+      editing ? '/admin/api/announcements/' + editing : '/admin/api/announcements',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          body,
+          pinned: $('notice-pinned').checked,
+          is_published: $('notice-published').checked,
+        }),
+      });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.message || data.error || 'HTTP ' + resp.status);
+    resetNoticeEditor();
+    showNoticeResult(true, editing
+      ? '✅ 公告 #' + editing + ' 已更新。'
+      : '✅ 公告已创建 (#' + data.id + ')。' +
+        ($('notice-published').checked ? '' : ' 仍是草稿，传完附件后记得发布。'));
+    await loadNotices();
+  } catch (err) {
+    showNoticeResult(false, '❌ 保存失败: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    if (btn.textContent === '⏳ 保存中...') btn.textContent = restore;
+  }
+});
+
+async function setNoticeFlags(a, patch) {
+  try {
+    const resp = await fetch('/admin/api/announcements/' + a.id, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    await loadNotices();
+  } catch (err) {
+    alert('操作失败: ' + err.message);
+  }
+}
+
+async function deleteNotice(a) {
+  // The count of attached media is not in this row — it costs a request, and
+  // this list is loaded in full. The warning says what will go, and the server
+  // deletes the objects before the row, so a failed run leaves the announcement
+  // listed and retryable rather than half gone.
+  if (!confirm('确认删除公告 "' + (a.title || a.body || '#' + a.id).slice(0, 40)
+      + '"？其图片、视频和附件也会一并删除，且不可撤销。')) return;
+  try {
+    const resp = await fetch('/admin/api/announcements/' + a.id, { method: 'DELETE' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.message || data.error || 'HTTP ' + resp.status);
+    if (noticeEditingId === a.id) resetNoticeEditor();
+    showNoticeResult(true, '✅ 公告已删除' +
+      (data.deleted_media ? `（含 ${data.deleted_media} 个附件）` : '') + '。');
+    await loadNotices();
+  } catch (err) {
+    showNoticeResult(false, '❌ 删除失败: ' + err.message);
+  }
+}
+
+function showNoticeResult(ok, text) {
+  const box = $('notice-result');
+  box.hidden = false;
+  box.className = 'admin-result ' + (ok ? 'ok' : 'err');
+  box.textContent = text;
+}
+
+// The 公告 section is the one attach target that is not in the file listing, so
+// it is loaded once at startup — otherwise picking 「📢 公告附件」 offers an
+// empty dropdown until the admin happens to click 加载公告.
+loadNotices();
 
 function $(id) { return document.getElementById(id); }
 function mkNote(cls, text) {

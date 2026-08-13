@@ -492,6 +492,132 @@ appears — resuming an aborted multipart upload loops forever. A non-409 status
 here would be worse than the collision: `!ok` alone is non-fatal and lands in
 exactly that loop.
 
+### Announcements: the one feature that names no file
+
+Migration 0006 adds `announcements` and `announcement_media`. They are the only
+tables here that do not join `files.path`, which is why they are absent from
+`repoint_file_path` and from all four `delete_*_for_path` functions — by
+design, not by omission. An announcement is site-wide: it survives every
+rename and every file delete.
+
+Two flags, and they are different kinds of flag:
+
+- **`is_published` is the only visibility gate.** Same role `clips.is_public`
+  plays. Nothing else may decide whether the feed returns a row; two visibility
+  flags eventually disagree and then nobody can say why a notice is missing.
+- **`pinned` is ordering only**, exactly as `clips.set_id` is grouping only.
+  Any number of rows may carry it — the feed is one flat
+  `ORDER BY pinned DESC, created_at DESC`, so pinning re-sorts and never
+  filters, and "only one pin" is a rule that would have to be enforced
+  somewhere and would then have to be un-enforced on the next request.
+
+`set_announcement_flags` deliberately does **not** touch `updated_at`: that
+column is the *text's* timestamp and the feed shows it, so pinning a month-old
+notice must not make it look rewritten. It is also why editing and toggling are
+two writers rather than one whole-record update — the editor owns title/body,
+the list rows own the flags, and a pin click in a list loaded ten minutes ago
+would otherwise write that stale text back over an edit made since.
+
+**Media is one table for both kinds**, unlike the deliberate `proxy_videos` /
+`file_attachments` split. That split exists because the two are read by
+different hot routes and merging them would put a `WHERE kind =` on
+`/api/proxy`. Here both are read by the *same* query on the *same* route, so a
+`kind` column would be a filter nobody runs plus a second thing to keep in sync
+with `content_type`. The renderer decides: `image/`, `video/` and `audio/` go
+inline, everything else becomes a download.
+
+- **There is no announcement serve route**, for the same reason attachments
+  have none: `/api/file/*key` does no D1 read and already re-clamps any
+  non-media stored type to `application/octet-stream`, so
+  `/api/file/{key}?download=1&name={filename}` serves a PDF safely today.
+- `sanitize_announcement_content_type()` is the **union** of the two existing
+  clamps — an announcement carries both an image and a PDF, so neither fits
+  alone. Like `sanitize_attachment_content_type` it is D1/R2 metadata only, and
+  the serve path must keep ignoring it.
+- The feed therefore renders media as `<img>` / `<video>` / `<audio>` / `<a
+  download>` and **never `<iframe>` or `<object>`**. Those two execute their
+  content, which is what would reopen the stored-XSS hole on `/admin`'s origin.
+- The feed's two statements — the listing and the media — take the **same
+  LIMIT/OFFSET**, so the media query describes exactly the page that was
+  returned. One query per row instead would put an N-way fan-out on the
+  gallery's first paint.
+
+**Create is its own step, before any upload.** Media hangs off an
+`announcements.id`, so the row has to exist first; `is_published` defaults to
+false so the sequence is write → attach → publish, and an unfinished notice is
+never on the homepage. `POST /admin/api/announcements` refuses only when title
+*and* body are both empty — "has media" cannot be a requirement at create time.
+
+Deleting fans out like the file delete and for the same reasons: R2 objects
+first, media rows next, the announcement row **last**, because while that row
+survives the whole route can be replayed and every step is idempotent. A failed
+object delete must **not** drop its row — the row is the only surviving name
+for that key, and nothing else enumerates these objects. Failures are collected
+and answered 502 with everything still listed.
+
+`/announcement/complete` re-checks that the announcement still exists, aborts
+the multipart upload and 409s if it does not. Same stale-decision class as
+`/proxy/complete` and `/attachment/complete`, and the same 409 contract: fatal,
+so the client never consults `uploadLanded()` and no Resume banner appears over
+an already-aborted upload.
+
+### The uploader's fourth mode binds to an id, not a path
+
+`ATTACH_SPECS.announcement` is the fourth mode of the one uploader (see "One
+uploader, three modes" above — it is now four, and the `attachSpec()` rule is
+what made adding one cheap). It gets resume, the progress bar, the wake lock
+and the retry set for free.
+
+What is new is that **an attach target is no longer always a file path**.
+Proxies and attachments hang off `files.path`; announcement media hangs off an
+`announcements.id`. So every request that carries the target names it through
+`spec.targetParam` — `/start`, `/complete`, and the listing behind
+`uploadLanded()`. A hardcoded `?file_path=` anywhere in that path is a bug that
+appears only in the announcement mode, and only as a reconcile failure: the
+listing 400s, `uploadLanded()` returns null, and two of those send the admin to
+Discard over an object that is sitting in the bucket. That is the expensive one
+to get wrong, exactly as it was when the third mode landed.
+
+The session still stores the target under `attachFilePath` and reads it back
+through `sessionAttachTarget()`. Keeping the old field name is what lets an
+upload that was in flight when this version shipped still resume — same reason
+the accessor also reads the pre-rename `proxyFilePath`.
+
+The shared target `<select>` is repopulated by `applyUploadMode()` on **every**
+mode change, because the two populations come from different lists (files vs
+announcements). Without that, switching to 公告附件 leaves a file path selected
+and the first upload posts it as an `announcement_id`. `admin.js` also loads
+the announcement list once at startup for that dropdown — it is the one attach
+target that is not in the file listing.
+
+### The gallery's notice feed
+
+`.notices` needs `width: 100%` for the reason documented under "Page containers
+need an explicit `width: 100%`" — it is a flex item of a column `body` with
+`margin: 0 auto`, so without it the box is `fit-content`, floored by its widest
+child's min-content. An announcement body is free text that can hold a pasted
+URL, i.e. one unbreakable token, so `overflow-wrap: anywhere` on `.notice-body`
+is load-bearing too. Check it the documented way — a same-origin iframe at
+390px, `documentElement.scrollWidth` vs `innerWidth` — and check it **with a
+long unbroken string in the body**, because short text will not reproduce it.
+
+The body renders `white-space: pre-wrap`: the admin types into a textarea, so
+their line breaks are the formatting. It is `textContent`, never `innerHTML` —
+no Markdown, no linkification. This is the same origin as `/admin`.
+
+Which is why the **body is stored untrimmed** while the title is trimmed: a
+title is one line, so its surrounding space is noise, but the body's leading
+indentation and trailing blank line are things the admin typed and can see. Only
+the both-empty check calls `.trim()`. The update route matters most here — its
+fallback carries `existing.body` through when a title-only patch arrives, so
+trimming there would silently reformat text the request never sent.
+
+Dates are **not** parsed with `Date`. D1 writes `datetime('now')`, i.e.
+`YYYY-MM-DD HH:MM:SS` with no zone marker: Safari refuses it and Chrome reads
+it as *local* time, so a shared timestamp would be wrong by the viewer's offset.
+`formatNoticeDate` takes the date part as text, which is the only field a notice
+actually needs.
+
 ### Video codecs
 
 Uploads are a mix of H.264, HEVC and AV1 (see README for the matrix and ffmpeg

@@ -591,3 +591,62 @@
   .admin-nav a, .rename-dialog-actions button, .upload-mode label { min-height: 38px; display: flex; align-items: center; }
   .admin-nav a { align-items: center; }
 }
+
+/* ── Announcements ── */
+.notice-editor { margin-bottom: 1.2rem; }
+
+/* The one multi-line input in the admin UI. Matched to `.form-group input`
+   rather than left at the UA default, which is a 13px monospace box a third of
+   the width of everything around it. `resize: vertical` only — a horizontal
+   resize can push the section wider than the viewport, which is the same
+   min-content overflow the page nav already tripped once. */
+.notice-editor textarea {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 2px solid var(--soft-blue);
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  transition: var(--transition);
+}
+.notice-editor textarea:focus {
+  border-color: var(--pink);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 182, 193, 0.2);
+}
+
+.notice-flags { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0.75rem 0; }
+.notice-flags label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.notice-badge {
+  display: inline-block;
+  margin-left: 0.45rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  vertical-align: middle;
+}
+.notice-badge.pin { background: var(--soft-blue); color: var(--text); }
+.notice-badge.draft { background: var(--warn-bg); color: var(--warn); }
+
+/* The admin's own line breaks are content, so the preview keeps them — but it
+   is a list row, not the announcement, so it is capped at three lines.
+   `overflow-wrap: anywhere` because a pasted URL is one unbreakable token and
+   would otherwise set this row's min-content width, widening the whole page. */
+.notice-preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0.2rem 0;
+}

@@ -26,6 +26,7 @@
 
     <nav class="admin-nav" aria-label="分区">
       <a href="#sec-upload">🍰 上传</a>
+      <a href="#sec-notice">📢 公告</a>
       <a href="#sec-files">📋 文件</a>
       <a href="#sec-proxy">📹 代理</a>
       <a href="#sec-clips">✂️ 切片</a>
@@ -45,6 +46,7 @@
         <label><input type="radio" name="upload-mode" value="file" checked> 📄 普通文件</label>
         <label><input type="radio" name="upload-mode" value="proxy"> 📹 代理</label>
         <label><input type="radio" name="upload-mode" value="attachment"> 📎 关联文件</label>
+        <label><input type="radio" name="upload-mode" value="announcement"> 📢 公告附件</label>
       </div>
 
       <div class="upload-zone" id="upload-zone">
@@ -104,6 +106,44 @@
       </div>
 
       <div class="upload-result" hidden id="upload-result"></div>
+    </div>
+
+    <!-- Announcement Section
+         Above the file list because it is the only section that publishes to
+         the gallery's own front page; everything below it manages stored files.
+         Media is attached from the upload section's 「📢 公告附件」 mode, which
+         is why there is no picker here — an announcement has to exist (and so
+         have an id) before anything can be attached to it. -->
+    <div class="admin-section" id="sec-notice">
+      <h2>📢 公告</h2>
+      <p class="admin-note">公告显示在画廊首页顶部。置顶不限数量，置顶的公告排在最前；未发布的公告只有这里能看到，可以先写好、传完图片再发布。</p>
+
+      <div class="notice-editor">
+        <div class="form-group">
+          <label for="notice-title">🏷 标题 (选填)</label>
+          <input type="text" id="notice-title" maxlength="120" placeholder="例如: 本周直播安排">
+        </div>
+        <div class="form-group">
+          <label for="notice-body">📝 正文</label>
+          <textarea id="notice-body" rows="5" maxlength="4000" placeholder="纯文本，换行会保留。"></textarea>
+          <div class="form-hint">纯文本显示，不解析 HTML 或 Markdown。</div>
+        </div>
+        <div class="notice-flags">
+          <label><input type="checkbox" id="notice-pinned"> 📌 置顶</label>
+          <label><input type="checkbox" id="notice-published" checked> 👁 立即发布</label>
+        </div>
+        <div class="admin-inline-form">
+          <button class="btn-file-action btn-rename" id="btn-notice-save">✅ 发布公告</button>
+          <button class="btn-file-action" id="btn-notice-cancel" hidden>取消编辑</button>
+        </div>
+        <div id="notice-result" class="admin-result" hidden></div>
+      </div>
+
+      <div class="admin-toolbar">
+        <button class="btn-file-action" id="btn-load-notices">🔄 加载公告</button>
+        <span class="admin-count" id="notice-count"></span>
+      </div>
+      <div id="notice-list"><span class="admin-empty">点击"加载公告"查看。</span></div>
     </div>
 
     <!-- File List Section -->

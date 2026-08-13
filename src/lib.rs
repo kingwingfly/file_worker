@@ -192,6 +192,60 @@ fn sanitize_attachment_content_type(raw: &str) -> String {
     }
 }
 
+/// The union of the two clamps above, for announcement media.
+///
+/// An announcement carries both kinds — a poster or a teaser video, which the
+/// feed renders inline, and a PDF, which it offers as a download — so neither
+/// existing clamp fits alone: `sanitize_content_type` would flatten the PDF and
+/// `sanitize_attachment_content_type` would flatten the image. Composing them
+/// keeps each one's allow-list intact rather than writing a third.
+///
+/// This is still only what gets *stored*. `/api/file/*key` re-clamps on the way
+/// out with `sanitize_content_type`, which is what keeps a stored `application/
+/// pdf` from ever being served as a rendered type on `/admin`'s origin — and
+/// why the feed must never put announcement media in an `<iframe>`/`<object>`.
+fn sanitize_announcement_content_type(raw: &str) -> String {
+    let media = sanitize_content_type(raw);
+    if media != "application/octet-stream" {
+        return media;
+    }
+    sanitize_attachment_content_type(raw)
+}
+
+/// One page of announcements with each row's media nested inside it.
+///
+/// Shared by the public feed and the admin listing so the admin sees the same
+/// grouping viewers get; `published_only` is the only difference between them.
+/// Both queries take the same LIMIT/OFFSET, so the media statement describes
+/// exactly the page the listing returned.
+async fn announcement_page(
+    ctx: &RouteContext<()>,
+    published_only: bool,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<serde_json::Value>> {
+    let items = db::list_announcements(ctx, published_only, offset, limit).await?;
+    let media = db::list_announcement_media_page(ctx, published_only, offset, limit).await?;
+
+    Ok(items
+        .into_iter()
+        .map(|a| {
+            let mine: Vec<&db::AnnouncementMediaRecord> =
+                media.iter().filter(|m| m.announcement_id == a.id).collect();
+            serde_json::json!({
+                "id": a.id,
+                "title": a.title,
+                "body": a.body,
+                "pinned": a.pinned,
+                "is_published": a.is_published,
+                "created_at": a.created_at,
+                "updated_at": a.updated_at,
+                "media": mine,
+            })
+        })
+        .collect())
+}
+
 /// Reject cross-site state-changing calls to the admin API.
 ///
 /// Admin routes authenticate on the `CF_Authorization` cookie alone, and
@@ -2039,6 +2093,441 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 "deleted": count,
             }))?
             .with_headers(cors::headers()?))
+        })
+        // === Announcements ===
+        // GET /api/announcements — the gallery's notice feed (public)
+        //
+        // Two statements, never one per row: the gallery's first paint waits on
+        // this, so the media for the whole page is fetched in a single query and
+        // grouped here. No Cache-Control, matching /api/files and /api/clips —
+        // an announcement is published by an admin click and has to appear on
+        // the next load, which is exactly what a max-age would prevent.
+        .get_async("/api/announcements", |req, ctx| async move {
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u32 = qs
+                .get("limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20)
+                .min(50);
+
+            let items = announcement_page(&ctx, true, offset, limit).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "announcements": items,
+                "offset": offset,
+                "limit": limit,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // GET /admin/api/announcements — drafts included
+        .get_async("/admin/api/announcements", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let offset: u32 = qs.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            let limit: u32 = qs
+                .get("limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50)
+                .min(200);
+
+            let items = announcement_page(&ctx, false, offset, limit).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "announcements": items,
+                "offset": offset,
+                "limit": limit,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/announcements — create, and hand back the new id
+        //
+        // The id is the reason create is its own step rather than part of a
+        // save-with-media flow: media is uploaded *to* an announcement, so one
+        // has to exist first. `is_published: false` is what makes that
+        // sequence safe — write it, attach the poster, then publish.
+        .post_async("/admin/api/announcements", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Announcement create by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let title = clamp_text(body["title"].as_str().unwrap_or("").trim(), 120);
+            // The title is one line, so its surrounding whitespace is noise. The
+            // body is **not** trimmed: the feed renders it `white-space:
+            // pre-wrap`, so the admin's indentation and trailing blank line are
+            // formatting they typed on purpose. Only the emptiness test below
+            // looks past the whitespace.
+            let text = clamp_text(body["body"].as_str().unwrap_or(""), 4000);
+            let pinned = body["pinned"].as_bool().unwrap_or(false);
+            // Default false: an announcement created by an older client that
+            // does not send the field is a draft, which is the recoverable
+            // mistake. Defaulting to published puts unfinished text on the
+            // homepage.
+            let is_published = body["is_published"].as_bool().unwrap_or(false);
+
+            // Both empty is the only refusal. Text-only is the common case and
+            // title-only is a legitimate one-liner; media can only be attached
+            // after the row exists, so "has media" cannot be a requirement here.
+            if title.is_empty() && text.trim().is_empty() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "empty",
+                    "message": "标题和正文不能都为空。",
+                }))?
+                .with_status(400)
+                .with_headers(cors::headers()?));
+            }
+
+            let id = db::insert_announcement(&ctx, &title, &text, pinned, is_published).await?;
+            console_log!("Announcement created: id={}, published={}", id, is_published);
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "id": id,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/announcements/{id} — edit text, or flip the flags
+        //
+        // Two writers, picked by which fields the body carries, because they
+        // come from two different screens: the editor owns title/body, the list
+        // rows own pinned/is_published. A single whole-record update would let
+        // a pin click in a list loaded ten minutes ago write that stale text
+        // back over an edit made since.
+        .post_async("/admin/api/announcements/:id", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let id: i32 = ctx
+                .param("id")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if id == 0 {
+                return Ok(Response::error("Bad Request: invalid announcement id", 400)?
+                    .with_headers(cors::headers()?));
+            }
+            console_log!("Announcement {} update by: {:?}", id, claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let existing = match db::get_announcement(&ctx, id).await? {
+                Some(a) => a,
+                None => return json_not_found("公告不存在。"),
+            };
+
+            if body.get("title").is_some() || body.get("body").is_some() {
+                let title = clamp_text(
+                    body["title"].as_str().unwrap_or(&existing.title).trim(),
+                    120,
+                );
+                // Untrimmed, like create — and note the fallback: a title-only
+                // patch carries `existing.body` through unchanged, so trimming
+                // here would silently reformat text this request never sent.
+                let text = clamp_text(body["body"].as_str().unwrap_or(&existing.body), 4000);
+                if title.is_empty() && text.trim().is_empty() {
+                    return Ok(Response::from_json(&serde_json::json!({
+                        "error": "empty",
+                        "message": "标题和正文不能都为空。",
+                    }))?
+                    .with_status(400)
+                    .with_headers(cors::headers()?));
+                }
+                db::update_announcement(&ctx, id, &title, &text).await?;
+            }
+
+            if body.get("pinned").is_some() || body.get("is_published").is_some() {
+                let pinned = body["pinned"]
+                    .as_bool()
+                    .unwrap_or(existing.pinned != 0);
+                let is_published = body["is_published"]
+                    .as_bool()
+                    .unwrap_or(existing.is_published != 0);
+                db::set_announcement_flags(&ctx, id, pinned, is_published).await?;
+            }
+
+            Ok(Response::from_json(&serde_json::json!({"ok": true, "id": id}))?
+                .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/announcements/{id} — the row and every object it owns
+        //
+        // Same fan-out shape as the file delete, and the same retry anchor: the
+        // R2 objects go first, the media rows next, the announcement row last.
+        // While the announcement row survives, the whole route can be replayed,
+        // and every step in it is idempotent.
+        //
+        // A failed object delete therefore must *not* drop its row — the row is
+        // the only surviving name for that key, and nothing else enumerates
+        // these objects, which is the entire reason this block exists. Failures
+        // are collected and answered 502 with everything still listed.
+        .delete_async("/admin/api/announcements/:id", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let id: i32 = ctx
+                .param("id")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            if id == 0 {
+                return Ok(Response::error("Bad Request: invalid announcement id", 400)?
+                    .with_headers(cors::headers()?));
+            }
+            console_log!("Announcement {} delete by: {:?}", id, claims.email);
+
+            if db::get_announcement(&ctx, id).await?.is_none() {
+                return json_not_found("公告不存在。");
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let keys = db::list_announcement_media_keys(&ctx, id).await?;
+            let mut failed: Vec<String> = Vec::new();
+            for key in &keys {
+                if let Err(e) = bucket.delete(key).await {
+                    console_log!("Announcement media delete failed: {} ({:?})", key, e);
+                    failed.push(key.clone());
+                }
+            }
+            if !failed.is_empty() {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "media_delete_failed",
+                    "message": "部分附件删除失败，公告未删除，请重试。",
+                    "failed": failed,
+                }))?
+                .with_status(502)
+                .with_headers(cors::headers()?));
+            }
+
+            db::delete_announcement_media_for_id(&ctx, id).await?;
+            db::delete_announcement(&ctx, id).await?;
+
+            console_log!("Announcement {} deleted with {} media object(s)", id, keys.len());
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "deleted_media": keys.len(),
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/announcement/start — begin a media upload
+        //
+        // A fourth mode of the one uploader, not a fifth code path: /start and
+        // /complete are the only things that differ, so announcement media gets
+        // resume, the progress bar, the wake lock and the retry set for free.
+        // Singular path segment, like /admin/api/proxy/start — the plural is the
+        // CRUD resource, and keeping them apart means no `:id`-vs-static sibling.
+        .post_async("/admin/api/announcement/start", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Announcement media upload start by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let announcement_id: i32 = body["announcement_id"]
+                .as_i64()
+                .or_else(|| body["announcement_id"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0) as i32;
+            let filename = body["filename"].as_str().unwrap_or("media");
+            let content_type = sanitize_announcement_content_type(
+                body["content_type"].as_str().unwrap_or_default(),
+            );
+
+            if announcement_id == 0 {
+                return Ok(Response::error(
+                    "Bad Request: announcement_id is required",
+                    400,
+                )?
+                .with_headers(cors::headers()?));
+            }
+
+            // Media bound to an id that names no announcement is unreachable:
+            // the feed is queried by announcement, so nothing would ever list
+            // it again. Same guard as `/attachment/start`'s `path_exists`.
+            if db::get_announcement(&ctx, announcement_id).await?.is_none() {
+                return json_not_found("公告不存在。");
+            }
+
+            let ts = Date::now().as_millis();
+            let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+            let key = format!(
+                "announcements/{}/{}-{:08x}/{}",
+                ts / 86_400_000,
+                ts,
+                rand,
+                filename
+            );
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let metadata = HttpMetadata {
+                content_type: Some(content_type.clone()),
+                ..Default::default()
+            };
+            let upload = bucket
+                .create_multipart_upload(&key)
+                .http_metadata(metadata)
+                .execute()
+                .await?;
+            let upload_id = upload.upload_id().await;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "upload_id": upload_id,
+                "key": key,
+                "announcement_id": announcement_id,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/announcement/complete — finish upload + insert the row
+        .post_async("/admin/api/announcement/complete", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Announcement media complete by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let upload_id = body["upload_id"].as_str().unwrap_or("").to_string();
+            let key = body["key"].as_str().unwrap_or("").to_string();
+            let announcement_id: i32 = body["announcement_id"]
+                .as_i64()
+                .or_else(|| body["announcement_id"].as_str().and_then(|s| s.parse().ok()))
+                .unwrap_or(0) as i32;
+            let label = clamp_text(body["label"].as_str().unwrap_or(""), 48);
+            let filename = clamp_text(body["filename"].as_str().unwrap_or(""), 120);
+            let content_type = sanitize_announcement_content_type(
+                body["content_type"].as_str().unwrap_or_default(),
+            );
+            let parts_json = body["parts"]
+                .as_array()
+                .ok_or_else(|| worker::Error::RustError("missing parts array".into()))?;
+
+            if upload_id.is_empty() || key.is_empty() || announcement_id == 0 {
+                return Ok(Response::error(
+                    "Bad Request: missing upload_id, key, or announcement_id",
+                    400,
+                )?
+                .with_headers(cors::headers()?));
+            }
+
+            let uploaded_parts: Vec<UploadedPart> = parts_json
+                .iter()
+                .map(|p| {
+                    UploadedPart::new(
+                        p["n"].as_u64().unwrap_or(0) as u16,
+                        p["etag"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+
+            // Same stale-decision race as `/attachment/complete`: an upload runs
+            // for minutes and the delete route runs once, having already
+            // enumerated this table. A row inserted afterwards names an object
+            // nothing will ever list again. Aborting leaves no object at all, so
+            // this exit owes no cleanup — and 409 is what makes the client treat
+            // it as fatal instead of looping on Resume.
+            if db::get_announcement(&ctx, announcement_id).await?.is_none() {
+                let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+                let _ = upload.abort().await;
+                console_log!("Announcement media aborted: {} no longer exists", announcement_id);
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "file_gone",
+                    "message": "公告已被删除，附件上传已取消。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
+            let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+            let obj = upload.complete(uploaded_parts).await?;
+            let size = obj.size() as i64;
+
+            // Without a name the download would be served under an opaque
+            // storage key — `/api/file/{key}` cannot derive one (migration 0002).
+            let filename = if filename.trim().is_empty() {
+                key.rsplit('/').next().unwrap_or("media").to_string()
+            } else {
+                filename
+            };
+
+            match db::insert_announcement_media(
+                &ctx,
+                announcement_id,
+                &key,
+                &label,
+                &filename,
+                &content_type,
+                size,
+            )
+            .await
+            {
+                Ok(()) => {
+                    console_log!(
+                        "Announcement media complete: id={}, key={}, size={}",
+                        announcement_id,
+                        key,
+                        size
+                    );
+                    Ok(Response::from_json(&serde_json::json!({
+                        "ok": true,
+                        "key": key,
+                        "announcement_id": announcement_id,
+                        "filename": filename,
+                        "size": size,
+                    }))?
+                    .with_headers(cors::headers()?))
+                }
+                Err(e) => {
+                    console_log!("Announcement media insert failed, cleaning up R2: {:?}", e);
+                    let _ = bucket.delete(&key).await;
+                    Err(e)
+                }
+            }
+        })
+        // GET /admin/api/announcement-media?announcement_id=... — one announcement's media
+        //
+        // Also the reconcile oracle for a lost /complete response: the client
+        // asks this listing whether the upload actually landed. It has to be the
+        // announcement's own listing — no other listing contains these rows.
+        .get_async("/admin/api/announcement-media", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let announcement_id: i32 = qs
+                .get("announcement_id")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+
+            if announcement_id == 0 {
+                return Ok(Response::error(
+                    "Bad Request: announcement_id query param required",
+                    400,
+                )?
+                .with_headers(cors::headers()?));
+            }
+
+            let media = db::list_announcement_media(&ctx, announcement_id).await?;
+            Ok(Response::from_json(&serde_json::json!({
+                "media": media,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // DELETE /admin/api/announcement-media?key=... — one object and its row
+        .delete_async("/admin/api/announcement-media", |req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Announcement media delete by: {:?}", claims.email);
+
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let key = qs.get("key").map(|s| s.as_str()).unwrap_or("");
+
+            if key.is_empty() {
+                return Ok(Response::error("Bad Request: key query param required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            // Same guard as the proxy and attachment routes: only ever delete an
+            // object this table owns, or `?key=uploads/…` would delete a gallery
+            // file's bytes.
+            if !db::announcement_media_exists(&ctx, key).await? {
+                return json_not_found("公告附件不存在。");
+            }
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            bucket.delete(key).await?;
+            db::delete_announcement_media_by_key(&ctx, key).await?;
+
+            Ok(Response::from_json(&serde_json::json!({"ok": true}))?
+                .with_headers(cors::headers()?))
         })
         .get_async("/*path", |req, ctx| async move {
             let assets = ctx

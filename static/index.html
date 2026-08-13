@@ -38,6 +38,14 @@
     </button>
   </nav>
 
+  <!-- Announcements. Above everything, including the clip rank: it is the only
+       thing on this page the admin writes directly, and a notice nobody scrolls
+       to is not a notice. Stays hidden until the feed has something, so the
+       page is unchanged when there is nothing to say. -->
+  <section class="notices" id="notices" hidden aria-label="公告">
+    <div class="notice-list" id="notice-feed"></div>
+  </section>
+
   <!-- Clip rank. Above the gallery on purpose: the gallery is a list of source
        files, this is a list of the moments people actually came for. Collapsed
        to one row of controls until it has something to show. -->

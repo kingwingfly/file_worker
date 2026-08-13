@@ -88,9 +88,160 @@ function init() {
   dom.rankTabTime?.addEventListener('click', () => setRankSort('time'));
   dom.rankMore?.addEventListener('click', () => loadRank(false));
 
+  dom.notices = document.getElementById('notices');
+  dom.noticeFeed = document.getElementById('notice-feed');
+
   // Initial load
   fetchFiles();
   loadRank(true);
+  loadNotices();
+}
+
+// ── Announcements ──
+// Admin-written text, plus whatever it carries: images and video render inline,
+// anything else is offered as a download. Failure is silent on purpose — the
+// gallery is the page's job, and an announcement that cannot be fetched must
+// not put an error box above it.
+async function loadNotices() {
+  try {
+    const resp = await fetch('/api/announcements');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderNotices(data.announcements || []);
+  } catch (_) { /* the gallery below is unaffected */ }
+}
+
+function renderNotices(items) {
+  if (!items.length) return;
+  dom.noticeFeed.replaceChildren(...items.map(noticeCard));
+  dom.notices.hidden = false;
+}
+
+// Every string here goes in through textContent, and the media below is only
+// ever <img>/<video>/<audio> or an <a download> — never an <iframe> or <object>.
+// This renders on the same origin as /admin, and `/api/file/*key` deliberately
+// serves anything non-media as application/octet-stream, so an embed that
+// *executes* its content is the one thing that would reopen that hole.
+function noticeCard(a) {
+  const card = document.createElement('article');
+  card.className = 'notice-card' + (a.pinned ? ' pinned' : '');
+
+  const head = document.createElement('div');
+  head.className = 'notice-head';
+  if (a.pinned) {
+    const pin = document.createElement('span');
+    pin.className = 'notice-pin';
+    pin.textContent = '📌';
+    pin.title = '置顶';
+    head.append(pin);
+  }
+  if (a.title) {
+    const h = document.createElement('h3');
+    h.className = 'notice-title';
+    h.textContent = a.title;
+    head.append(h);
+  }
+  const time = document.createElement('time');
+  time.className = 'notice-date';
+  time.textContent = formatNoticeDate(a.created_at);
+  head.append(time);
+  card.append(head);
+
+  if (a.body) {
+    const body = document.createElement('div');
+    body.className = 'notice-body';
+    body.textContent = a.body;
+    card.append(body);
+    // Only long notices get the toggle. A three-line notice with a 展开 button
+    // under it reads as if something is being withheld.
+    if (a.body.length > 240) {
+      body.classList.add('clamped');
+      const more = document.createElement('button');
+      more.className = 'notice-more';
+      more.textContent = '展开全文';
+      more.addEventListener('click', () => {
+        const clamped = body.classList.toggle('clamped');
+        more.textContent = clamped ? '展开全文' : '收起';
+      });
+      card.append(more);
+    }
+  }
+
+  const media = (a.media || []);
+  if (media.length) {
+    const box = document.createElement('div');
+    box.className = 'notice-media';
+    box.append(...media.map(noticeMedia));
+    card.append(box);
+  }
+  return card;
+}
+
+// The stored content type decides the element: there is no `kind` column, and
+// there does not need to be one — a poster is an image because it is an image.
+// Anything the gallery cannot show inline becomes a download, which is also the
+// fallback for a type nobody anticipated.
+function noticeMedia(m) {
+  const url = `/api/file/${encodePath(m.key)}`;
+  const type = m.content_type || '';
+  const wrap = document.createElement('figure');
+  wrap.className = 'notice-media-item';
+
+  if (type.startsWith('image/')) {
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = m.label || m.filename || '';
+    img.loading = 'lazy';
+    wrap.append(img);
+  } else if (type.startsWith('video/')) {
+    const vid = document.createElement('video');
+    vid.src = url;
+    vid.controls = true;
+    vid.preload = 'metadata';
+    // No autoplay: an announcement is above the gallery, and a video that
+    // starts itself on every page load is the reason people close the tab.
+    wrap.append(vid);
+  } else if (type.startsWith('audio/')) {
+    const audio = document.createElement('audio');
+    audio.src = url;
+    audio.controls = true;
+    audio.preload = 'metadata';
+    wrap.append(audio);
+  } else {
+    const name = m.filename || m.key.split('/').pop() || 'download';
+    const link = document.createElement('a');
+    link.className = 'notice-file';
+    // `&name=` is what turns the opaque storage key into a real filename —
+    // /api/file cannot derive one (migration 0002).
+    link.href = `${url}?download=1&name=${encodeURIComponent(name)}`;
+    link.download = name;
+    link.textContent = `📎 ${m.label || name}`;
+    if (m.size) link.append(mkNoticeSize(m.size));
+    wrap.append(link);
+    return wrap;
+  }
+
+  if (m.label) {
+    const cap = document.createElement('figcaption');
+    cap.textContent = m.label;
+    wrap.append(cap);
+  }
+  return wrap;
+}
+
+function mkNoticeSize(size) {
+  const s = document.createElement('span');
+  s.className = 'notice-file-size';
+  s.textContent = ' · ' + formatFileSize(size);
+  return s;
+}
+
+// D1 writes `datetime('now')`, i.e. "YYYY-MM-DD HH:MM:SS" in UTC with no zone
+// marker — which Safari refuses to parse and Chrome reads as *local* time. So
+// the date is taken apart as text rather than handed to `Date`: the day is what
+// a notice needs, and a wrong-by-hours timestamp is worse than no clock.
+function formatNoticeDate(raw) {
+  return (raw || '').split(' ')[0] || '';
 }
 
 // ── Clip rank ──

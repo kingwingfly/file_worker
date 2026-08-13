@@ -1263,3 +1263,134 @@ body::after {
 @media (pointer: coarse) {
   .rank-tab, .rank-like, .rank-btn, .rank-more { min-height: 36px; }
 }
+
+/* ── Announcements (gallery front page) ── */
+
+/* `width: 100%` for the same reason `.clip-rank` has it: this is a flex item of
+   a column `body`, and `margin: 0 auto` is an auto margin on the cross axis,
+   which switches off `align-items: stretch` and sizes the box `fit-content` —
+   floored by the widest child's *min-content*. An announcement body is free
+   text that can hold a pasted URL, i.e. one unbreakable token, so without this
+   (and the `overflow-wrap` below) a single link widens the whole page and every
+   section overflows a phone sideways. */
+.notices {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto 1.5rem;
+  padding: 0 1rem;
+}
+
+.notice-list { display: flex; flex-direction: column; gap: 0.75rem; }
+
+.notice-card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem 1.1rem;
+  box-shadow: var(--shadow);
+}
+
+/* Pinned reads as pinned without a second badge doing the same work: the 📌 is
+   in the heading and the accent runs down the edge. */
+.notice-card.pinned { border-left: 4px solid var(--pink); }
+
+.notice-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.notice-pin { font-size: 0.9rem; }
+.notice-title { font-size: 1rem; font-weight: 700; color: var(--text); }
+.notice-date { margin-left: auto; font-size: 0.75rem; color: var(--text-light); }
+
+/* The admin types plain text into a textarea, so their line breaks are the
+   formatting — `pre-wrap` is what preserves them. `anywhere` breaks a long URL
+   instead of letting it set the page's min-content width. */
+.notice-body {
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+  line-height: 1.65;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.notice-body.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.notice-more {
+  margin-top: 0.35rem;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text-light);
+  font-family: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.notice-media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+/* Each item is capped rather than laid out on a grid: an announcement carries a
+   poster or two, not a gallery, and a fixed grid would blow a portrait image up
+   to fill its cell. `min-width: 0` keeps a flex item from refusing to shrink
+   below its content — the same overflow trap as above, one level in. */
+.notice-media-item {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.notice-media-item img,
+.notice-media-item video {
+  display: block;
+  width: 100%;
+  max-height: 380px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  background: var(--muted-bg);
+}
+
+.notice-media-item audio { width: 100%; }
+
+.notice-media-item figcaption {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--text-light);
+  overflow-wrap: anywhere;
+}
+
+/* A download, never an inline embed: `/api/file/*key` serves anything non-media
+   as application/octet-stream on this origin, and an <iframe>/<object> is what
+   would make its content run. */
+.notice-file {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--muted-bg);
+  color: var(--text);
+  font-size: 0.85rem;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.notice-file:hover { border-color: var(--pink); }
+.notice-file-size { color: var(--text-light); font-size: 0.78rem; }
+
+@media (max-width: 640px) {
+  .notice-media-item { flex-basis: 100%; }
+  .notice-media-item img,
+  .notice-media-item video { max-height: 260px; }
+}

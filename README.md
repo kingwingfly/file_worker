@@ -99,6 +99,7 @@ npx wrangler deploy
 | GET | `/api/file/{key}?download=1` | Download file |
 | GET | `/api/proxy?file_path=` | List proxy videos for a file (feeds the gallery's source picker) |
 | GET | `/api/attachments?file_path=` | List a file's related files (subtitles, transcripts) |
+| GET | `/api/announcements?offset=&limit=` | Published announcements, pinned first, each with its media nested |
 | GET | `/api/skill` | The clip-writing skill (`SKILL.md`); `?download=1` attaches it |
 | POST | `/api/identity` | Issue signed identity cookie `{nickname}` |
 | GET | `/api/identity/me` | Return current identity or null |
@@ -135,6 +136,14 @@ npx wrangler deploy
 | POST | `/admin/api/attachment/complete` | Finish attachment upload + D1 insert (409s if the file was deleted meanwhile) |
 | GET | `/admin/api/attachment?file_path=` | List attachments for a file (admin) |
 | DELETE | `/admin/api/attachment?key=` | Delete an attachment by R2 key |
+| GET | `/admin/api/announcements` | List announcements, drafts included |
+| POST | `/admin/api/announcements` | Create `{title, body, pinned, is_published}` → `{id}` (draft by default) |
+| POST | `/admin/api/announcements/{id}` | Edit text (`title`/`body`) or flip flags (`pinned`/`is_published`) — send only what you own |
+| DELETE | `/admin/api/announcements/{id}` | Delete an announcement **and every object it carries** (502 with the row intact if R2 fails) |
+| POST | `/admin/api/announcement/start` | Start announcement media upload `{announcement_id, filename, label}` |
+| POST | `/admin/api/announcement/complete` | Finish it + D1 insert (409s if the announcement was deleted meanwhile) |
+| GET | `/admin/api/announcement-media?announcement_id=` | List one announcement's media (admin) |
+| DELETE | `/admin/api/announcement-media?key=` | Delete one media object by R2 key |
 | GET | `/admin/api/clips` | List all clips |
 | DELETE | `/admin/api/clips/{id}` | Delete any clip |
 | GET | `/admin/api/clip-sets` | List all clip sets |
