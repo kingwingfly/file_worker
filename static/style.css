@@ -216,15 +216,27 @@ body::after {
 }
 
 /* ── Filter Bar ── */
+/* The filters and the announcement button share one row. Centred rather than
+   pushed to opposite ends: the button is not a filter, but a lone pill floated
+   right reads as a page action and drifts miles from the tabs on a wide
+   screen. Wrapping keeps it on a phone. */
+.filter-row {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 1.25rem 1rem;
+  position: relative;
+  z-index: 1;
+}
+
 .filter-bar {
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 0.5rem;
-  padding: 1.5rem 1rem;
   flex-wrap: wrap;
-  position: relative;
-  z-index: 1;
 }
 
 .filter-btn {
@@ -1269,7 +1281,9 @@ body::after {
 /* One button, centred under the title. The feed itself lives in a modal, so
    this is the entire footprint announcements have on the gallery — the inline
    version pushed the grid off the first screen as soon as there were a few. */
-.notice-launcher { display: flex; justify-content: center; margin: 0 auto 1rem; }
+/* No margin of its own: it is a flex item of `.filter-row` now, and the row's
+   own padding is the only vertical space announcements cost the page. */
+.notice-launcher { display: flex; }
 
 .notice-open-btn {
   display: inline-flex;
@@ -1437,4 +1451,22 @@ body::after {
   .notice-media-item { flex-basis: 100%; }
   .notice-media-item img,
   .notice-media-item video { max-height: 260px; }
+}
+
+/* A cover on a video or audio card: the picture fills the same box an image
+   card uses, with a small badge so the card still reads as playable. The
+   wrapper is `position: relative` only for that badge — the thumbnail itself
+   keeps the geometry `.card-thumb` already had. */
+.card-thumb-wrap { position: relative; display: block; line-height: 0; }
+
+.card-kind {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.5rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  pointer-events: none;
 }

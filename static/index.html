@@ -23,33 +23,33 @@
     </div>
   </header>
 
-  <!-- Announcements are one button, directly under the title. The feed used to
-       render inline here and pushed the gallery off the first screen as soon as
-       there were more than a couple; the content moved into a modal and only
-       the entry point stays on the page. Hidden entirely when there is nothing
-       to say, so the layout is unchanged on a site with no announcements. -->
-  <div class="notice-launcher" id="notice-launcher" hidden>
-    <button class="notice-open-btn" id="notice-open" aria-haspopup="dialog">
-      <span aria-hidden="true">📢</span>
-      <span>公告</span>
-      <span class="notice-bar-count" id="notice-bar-count"></span>
-    </button>
+  <!-- The announcement button rides in the filter row rather than owning a row
+       of its own: on its own line it cost a full band of vertical space above
+       the fold for one pill. It is not a filter, so it stays outside the <nav>
+       and only shares the row. Hidden entirely when there is nothing to say. -->
+  <div class="filter-row">
+    <nav class="filter-bar" aria-label="筛选">
+      <button class="filter-btn active" data-filter="all" aria-pressed="true">
+        ✨ 全部
+      </button>
+      <button class="filter-btn" data-filter="image" aria-pressed="false">
+        🖼️ 图片
+      </button>
+      <button class="filter-btn" data-filter="video" aria-pressed="false">
+        🎬 视频
+      </button>
+      <button class="filter-btn" data-filter="audio" aria-pressed="false">
+        🎵 音频
+      </button>
+    </nav>
+    <div class="notice-launcher" id="notice-launcher" hidden>
+      <button class="notice-open-btn" id="notice-open" aria-haspopup="dialog">
+        <span aria-hidden="true">📢</span>
+        <span>公告</span>
+        <span class="notice-bar-count" id="notice-bar-count"></span>
+      </button>
+    </div>
   </div>
-
-  <nav class="filter-bar" aria-label="筛选">
-    <button class="filter-btn active" data-filter="all" aria-pressed="true">
-      ✨ 全部
-    </button>
-    <button class="filter-btn" data-filter="image" aria-pressed="false">
-      🖼️ 图片
-    </button>
-    <button class="filter-btn" data-filter="video" aria-pressed="false">
-      🎬 视频
-    </button>
-    <button class="filter-btn" data-filter="audio" aria-pressed="false">
-      🎵 音频
-    </button>
-  </nav>
 
   <!-- Clip rank. Above the gallery on purpose: the gallery is a list of source
        files, this is a list of the moments people actually came for. Collapsed

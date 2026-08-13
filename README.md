@@ -138,6 +138,10 @@ npx wrangler deploy
 | GET | `/admin/api/attachment?file_path=` | List attachments for a file (admin) |
 | DELETE | `/admin/api/attachment?key=` | Delete an attachment by R2 key |
 | GET | `/admin/api/dashboard?days=` | Overview tiles + daily play/download series + busiest files (days clamped 1–365) |
+| POST | `/admin/api/cover/start` | Start a cover image upload `{file_path, filename}` (refuses non-images and SVG) |
+| POST | `/admin/api/cover/complete` | Finish it and point `files.cover_key` at it |
+| GET | `/admin/api/cover?file_path=` | This file's cover, as a list of zero or one |
+| POST | `/admin/api/files/cover` | Use one of the file's own attachments as the cover `{path, key}`, or clear with no key |
 | GET | `/admin/api/announcements` | List announcements, drafts included |
 | POST | `/admin/api/announcements` | Create `{title, body, pinned, is_published}` → `{id}` (draft by default) |
 | POST | `/admin/api/announcements/{id}` | Edit text (`title`/`body`) or flip flags (`pinned`/`is_published`) — send only what you own |
@@ -222,13 +226,15 @@ A resume after a page reload needs the same file re-selected from disk: a `File`
 handle cannot be persisted, and resuming with a different file would splice
 foreign bytes into the object. Name, size and last-modified must all match.
 
-The upload section has four modes. **普通文件** uploads a new object; **代理**
+The upload section has five modes. **普通文件** uploads a new object; **代理**
 attaches a low-quality playback source (360p, audio-only, …) to a file that
 already exists, picked from a dropdown; **关联文件** attaches a downloadable
 related file (subtitles, a transcript) the same way; **公告附件** attaches an
-image, video or PDF to an announcement, picked from the same dropdown. All four
-run through the same uploader, so every attach mode gets resume, progress and
-the wake lock too. The 代理与关联文件 section lists and deletes the first two;
+image, video or PDF to an announcement, picked from the same dropdown; **🖼 封面**
+sets a file's gallery cover. All five run through the same uploader, so every
+attach mode gets resume, progress and the wake lock too. A cover can also be
+picked from the file's existing related images, in the 🖼 封面 dialog on its row
+— that copies nothing, it just points at the object already in the bucket. The 代理与关联文件 section lists and deletes the first two;
 the 公告 section lists and deletes the third. None of them upload.
 
 **Set an R2 lifecycle rule to abort incomplete multipart uploads** (7 days is

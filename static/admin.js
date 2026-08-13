@@ -73,6 +73,27 @@ const ATTACH_SPECS = {
     listField: 'attachments',
     okPrefix: '✅ 关联文件上传成功!',
   },
+  cover: {
+    targetParam: 'file_path',
+    title: '🖼 上传封面',
+    accept: 'image/*',
+    zoneHint: '一张图片，作为该文件在画廊里的封面',
+    targetLabel: '🎯 为哪个文件设封面',
+    targetHint: '视频和音频在画廊里没有画面可显示，封面就是那张图。',
+    // A cover has no label of its own — it is one image per file, identified by
+    // the file it belongs to. The field stays in the DOM (the section is shared)
+    // but nothing reads it; `fallbackLabel` keeps the send path uniform.
+    labelLabel: '🏷 备注 (可不填)',
+    labelHint: '封面只有一张，这里填什么都不会显示。',
+    labelPlaceholder: '',
+    labelMax: 48,
+    fallbackLabel: 'cover',
+    startUrl: '/admin/api/cover/start',
+    completeUrl: '/admin/api/cover/complete',
+    listUrl: '/admin/api/cover',
+    listField: 'covers',
+    okPrefix: '✅ 封面已设置!',
+  },
   announcement: {
     targetParam: 'announcement_id',
     title: '📢 上传公告附件',
@@ -1067,7 +1088,14 @@ function renderFileList(files) {
       attachBtn.textContent = '🔗 归入';
       attachBtn.title = '把这个文件作为另一个文件的代理';
       attachBtn.addEventListener('click', () => attachFileDialog(f));
-      actions.append(attachBtn);
+      // Only on video and audio: an image is already its own thumbnail, so a
+      // cover would be a second picture standing in front of the first.
+      const coverBtn = document.createElement('button');
+      coverBtn.className = 'btn-file-action';
+      coverBtn.textContent = f.cover_key ? '🖼 封面 ✓' : '🖼 封面';
+      coverBtn.title = '设置画廊封面';
+      coverBtn.addEventListener('click', () => coverDialog(f));
+      actions.append(attachBtn, coverBtn);
     }
     actions.append(delBtn);
     // Size and actions share a wrapper so the ≤640 rule can drop the name
@@ -1516,6 +1544,120 @@ function noticeOptionText(a) {
   const head = (a.title || a.body || '').split('\n')[0].trim();
   const shown = head.length > 40 ? head.slice(0, 40) + '…' : head;
   return (a.is_published ? '' : '[草稿] ') + (shown || '(无标题)') + ' #' + a.id;
+}
+
+// ── Covers ──
+//
+// Two ways in, because they are genuinely different acts: uploading a new image
+// is an upload (so it belongs to the upload section, with resume and progress),
+// while picking one of the file's existing attachments is a single D1 write and
+// belongs here, next to the file it changes.
+async function coverDialog(file) {
+  const path = file.path || file.key;
+  const overlay = document.createElement('div');
+  overlay.className = 'rename-dialog-overlay';
+  const box = document.createElement('div');
+  box.className = 'rename-dialog cover-dialog';
+
+  const title = document.createElement('h3');
+  title.textContent = '🖼 封面';
+  const sub = document.createElement('p');
+  sub.className = 'admin-note';
+  sub.textContent = path;
+
+  const current = document.createElement('div');
+  current.className = 'cover-current';
+  current.textContent = '加载中...';
+
+  const pickWrap = document.createElement('div');
+  pickWrap.className = 'cover-picks';
+
+  const actions = document.createElement('div');
+  actions.className = 'dialog-actions';
+  const clear = document.createElement('button');
+  clear.className = 'btn-file-action danger';
+  clear.textContent = '清除封面';
+  const close = document.createElement('button');
+  close.className = 'btn-rename-cancel';
+  close.textContent = '关闭';
+  actions.append(clear, close);
+
+  box.append(title, sub, current, pickWrap, actions);
+  overlay.append(box);
+  document.body.append(overlay);
+
+  const shut = () => overlay.remove();
+  close.addEventListener('click', shut);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) shut(); });
+
+  const setCover = async (key) => {
+    const resp = await fetch('/admin/api/files/cover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, key: key || '' }),
+    });
+    const d = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert('设置失败: ' + (d.message || resp.status)); return; }
+    shut();
+    loadFiles();
+  };
+  clear.addEventListener('click', () => setCover(''));
+
+  // Both lists come from routes that already exist; nothing here is a new shape.
+  let cover = null, attachments = [];
+  try {
+    const [c, a] = await Promise.all([
+      fetch('/admin/api/cover?file_path=' + encodeURIComponent(path)).then(r => r.json()),
+      fetch('/admin/api/attachment?file_path=' + encodeURIComponent(path)).then(r => r.json()),
+    ]);
+    cover = (c.covers || [])[0] || null;
+    attachments = a.attachments || [];
+  } catch (err) {
+    current.textContent = '❌ 加载失败: ' + err.message;
+    return;
+  }
+
+  current.replaceChildren();
+  if (cover) {
+    const img = document.createElement('img');
+    img.className = 'cover-thumb';
+    img.src = '/api/file/' + encodePath(cover.key);
+    img.alt = '当前封面';
+    const cap = document.createElement('div');
+    cap.className = 'admin-row-sub';
+    cap.textContent = '当前封面';
+    current.append(img, cap);
+  } else {
+    current.append(mkNote('admin-empty', '还没有封面。'));
+  }
+
+  // Attachments are stored as application/octet-stream whatever they are (the
+  // serve path re-clamps anything non-media), so the *stored* type cannot say
+  // which ones are images — the filename is the only hint available, and a
+  // wrong guess costs nothing: the preview simply fails to load and the admin
+  // picks another.
+  const images = attachments.filter(a => /\.(jpe?g|png|gif|webp|avif|bmp)$/i.test(a.filename || ''));
+  const hint = document.createElement('div');
+  hint.className = 'form-hint';
+  hint.textContent = images.length
+    ? '也可以直接选用该文件的关联图片（不会复制文件）：'
+    : '要上传新封面，请用上方「🖼 封面」模式。该文件没有可用的关联图片。';
+  pickWrap.append(hint);
+
+  for (const a of images) {
+    const btn = document.createElement('button');
+    btn.className = 'cover-pick' + (cover && cover.key === a.key ? ' active' : '');
+    btn.title = a.filename;
+    const img = document.createElement('img');
+    img.src = '/api/file/' + encodePath(a.key);
+    img.alt = a.filename || '';
+    img.loading = 'lazy';
+    const cap = document.createElement('span');
+    cap.textContent = a.label || a.filename;
+    btn.append(img, cap);
+    btn.addEventListener('click', () => setCover(a.key));
+    pickWrap.append(btn);
+  }
 }
 
 // All three lists are the same shape — label · size, delete, keyed off the one

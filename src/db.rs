@@ -13,6 +13,14 @@ pub struct FileRecord {
     pub size: i64,
     pub content_type: String,
     pub uploaded_at: String,
+    /// R2 key of this file's cover image (migration 0008), or `None`.
+    ///
+    /// May point at an object this column owns (`covers/…`) *or* at one of the
+    /// file's own attachments, so it is never deleted without checking who else
+    /// names it. Serialised to the public listing, which is what lets the
+    /// gallery draw a poster instead of an emoji.
+    #[serde(default)]
+    pub cover_key: Option<String>,
 }
 
 /// Migration 0002 backfills `path` for every existing row, so the COALESCE here
@@ -20,7 +28,8 @@ pub struct FileRecord {
 /// *not* use it: `WHERE COALESCE(path, key) = ?` is an expression SQLite cannot
 /// match against `idx_files_path`, which turns every one of them — including
 /// `path_exists` on the upload path — into a full table scan.
-const SELECT_COLS: &str = "key, COALESCE(path, key) AS path, size, content_type, uploaded_at";
+const SELECT_COLS: &str =
+    "key, COALESCE(path, key) AS path, size, content_type, uploaded_at, cover_key";
 
 /// List files from D1 with optional filter and pagination
 pub async fn list_files(
@@ -1698,4 +1707,53 @@ pub async fn overview(ctx: &worker::RouteContext<()>) -> Result<Overview> {
         .first::<Overview>(None)
         .await?;
     row.ok_or_else(|| worker::Error::RustError("overview returned no row".into()))
+}
+
+// ── Covers ──
+
+/// Point a file's row at a cover image, or clear it with `None`.
+///
+/// Returns the key it replaced, so the caller can decide whether that object is
+/// now unreferenced and should be removed from R2 — a decision this function
+/// deliberately does not make, because a cover key may be an attachment's.
+pub async fn set_cover(
+    ctx: &worker::RouteContext<()>,
+    path: &str,
+    cover_key: Option<&str>,
+) -> Result<Option<String>> {
+    let previous = get_by_path(ctx, path).await?.and_then(|f| f.cover_key);
+    let db = ctx.d1("DB")?;
+    match cover_key {
+        Some(key) => {
+            db.prepare("UPDATE files SET cover_key = ? WHERE path = ?")
+                .bind(&[
+                    JsValue::from(&D1Type::Text(key)),
+                    JsValue::from(&D1Type::Text(path)),
+                ])?
+                .run()
+                .await?;
+        }
+        None => {
+            db.prepare("UPDATE files SET cover_key = NULL WHERE path = ?")
+                .bind(&[JsValue::from(&D1Type::Text(path))])?
+                .run()
+                .await?;
+        }
+    }
+    Ok(previous)
+}
+
+/// How many `files` rows still point at this cover key.
+///
+/// The other half of "is this object still needed": one file may pick another's
+/// image, and a cover that is also an attachment is not this column's to delete
+/// at all (`attachment_exists` covers that half).
+pub async fn cover_ref_count(ctx: &worker::RouteContext<()>, key: &str) -> Result<i32> {
+    let db = ctx.d1("DB")?;
+    let found = db
+        .prepare("SELECT COUNT(*) AS cnt FROM files WHERE cover_key = ?")
+        .bind(&[JsValue::from(&D1Type::Text(key))])?
+        .first::<i32>(Some("cnt"))
+        .await?;
+    Ok(found.unwrap_or(0))
 }

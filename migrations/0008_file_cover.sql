@@ -1,0 +1,29 @@
+-- A cover image for a file, so video and audio cards are not all one emoji.
+--
+-- A column on `files`, not a table: it is exactly one image per file, and the
+-- row that owns it is the row that already exists. A `file_covers` table would
+-- add a fifth thing keyed on `files.path` — a fifth entry in
+-- `repoint_file_path` and a fifth `delete_*_for_path` — to store a single
+-- nullable value. Living on the row also means **rename cannot detach it**,
+-- which is the failure mode every other attached thing has to be defended
+-- against.
+--
+-- `cover_key` is an R2 object name, and it is deliberately *not* owned
+-- exclusively by this column. It points at either:
+--
+--   - an object minted by `/admin/api/cover/complete` under `covers/…`, which
+--     nothing else names, or
+--   - an **existing attachment's** key, when the admin picks an image they had
+--     already uploaded as a related file. Nothing is copied: R2 has no cheap
+--     copy (see the rename notes), and an image that is already in the bucket
+--     does not need a second copy of its bytes to be pointed at.
+--
+-- So a cover object may be shared, and deleting one is never unconditional:
+-- the route checks `attachment_exists` / `proxy_exists` and counts other rows
+-- referencing the same key before removing anything. Same rule as everywhere
+-- else here — ask the table, never the key's prefix.
+--
+-- No index: the only reads are "this file's row", which the primary key and
+-- `idx_files_path` already serve, and a reference count on delete, which runs
+-- once per admin action on a table this small.
+ALTER TABLE files ADD COLUMN cover_key TEXT;

@@ -246,6 +246,40 @@ async fn announcement_page(
         .collect())
 }
 
+/// Delete a cover object **only if nothing else names it**.
+///
+/// `files.cover_key` does not own its object exclusively: it may point at one of
+/// the file's attachments, which the admin picked instead of uploading a second
+/// copy. So the checks are membership questions, never a prefix test on the key
+/// — a `covers/…` prefix says which uploader minted it, not who needs it now
+/// (the same lesson as `promote`).
+///
+/// Errors are swallowed and reported as "not removed": the caller has already
+/// repointed or dropped the row, and a failed object delete leaves a small
+/// orphan image rather than a broken page. It is reported so the delete route
+/// can count it as stranded.
+async fn release_cover_object(ctx: &RouteContext<()>, key: &str) -> Result<bool> {
+    if key.is_empty() {
+        return Ok(true);
+    }
+    // Still a live attachment or proxy: borrowed, never ours to delete.
+    if db::attachment_exists(ctx, key).await? || db::proxy_exists(ctx, key).await? {
+        return Ok(true);
+    }
+    // Still another file's cover.
+    if db::cover_ref_count(ctx, key).await? > 0 {
+        return Ok(true);
+    }
+    let bucket = ctx.bucket("FILE_BUCKET")?;
+    match bucket.delete(key).await {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            console_log!("Cover object delete failed: {} ({:?})", key, e);
+            Ok(false)
+        }
+    }
+}
+
 /// Reject cross-site state-changing calls to the admin API.
 ///
 /// Admin routes authenticate on the `CF_Authorization` cookie alone, and
@@ -1299,6 +1333,20 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 db::delete_attachments_for_path(&ctx, &path).await?;
             }
 
+            // The cover last of the objects, and *after* the attachment rows are
+            // gone: a cover that is one of this file's attachments is only
+            // deletable once that row no longer names it, and `release_cover_object`
+            // asks the tables rather than the key's prefix. A cover another file
+            // picked is left alone, which is why this cannot be a bare delete.
+            if let Some(cover) = record.cover_key.as_deref() {
+                // Clear this row's reference first, or the reference count it
+                // checks would still include this file.
+                db::set_cover(&ctx, &path, None).await?;
+                if !release_cover_object(&ctx, cover).await? {
+                    stranded += 1;
+                }
+            }
+
             // Bail before the clips, not after: clips carry no R2 object, so
             // deleting them is pure irreversible data loss, and doing it on a
             // run that is about to be retried destroys them while the file is
@@ -2095,6 +2143,223 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             Ok(Response::from_json(&serde_json::json!({
                 "ok": true,
                 "deleted": count,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // === Covers ===
+        // POST /admin/api/cover/start — begin a cover image upload
+        //
+        // A fifth mode of the one uploader. A cover is small enough that resume
+        // is beside the point, but going through the same path costs nothing and
+        // keeps the audit at one grep — the alternative is the stripped-down
+        // second uploader this project has already deleted twice.
+        .post_async("/admin/api/cover/start", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Cover upload start by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let filename = body["filename"].as_str().unwrap_or("cover.jpg");
+            let content_type = sanitize_content_type(body["content_type"].as_str().unwrap_or(""));
+
+            if file_path.is_empty() {
+                return Ok(Response::error("Bad Request: file_path is required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+            // Refused here rather than at /complete: the whole upload would
+            // otherwise transfer before anyone said the file is not an image.
+            // `sanitize_content_type` has already dropped SVG, which is the one
+            // image type that can carry script.
+            if !content_type.starts_with("image/") {
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "not_an_image",
+                    "message": "封面必须是图片（不支持 SVG）。",
+                }))?
+                .with_status(400)
+                .with_headers(cors::headers()?));
+            }
+            if db::get_by_path(&ctx, &file_path).await?.is_none() {
+                return json_not_found("文件不存在。");
+            }
+
+            let ts = Date::now().as_millis();
+            let rand = (js_sys::Math::random() * u32::MAX as f64) as u32;
+            let key = format!("covers/{}/{}-{:08x}/{}", ts / 86_400_000, ts, rand, filename);
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+            let metadata = HttpMetadata {
+                content_type: Some(content_type.clone()),
+                ..Default::default()
+            };
+            let upload = bucket
+                .create_multipart_upload(&key)
+                .http_metadata(metadata)
+                .execute()
+                .await?;
+            let upload_id = upload.upload_id().await;
+
+            Ok(Response::from_json(&serde_json::json!({
+                "upload_id": upload_id,
+                "key": key,
+                "file_path": file_path,
+            }))?
+            .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/cover/complete — finish the upload and point the row at it
+        .post_async("/admin/api/cover/complete", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Cover complete by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let upload_id = body["upload_id"].as_str().unwrap_or("").to_string();
+            let key = body["key"].as_str().unwrap_or("").to_string();
+            let file_path = body["file_path"].as_str().unwrap_or("").to_string();
+            let parts_json = body["parts"]
+                .as_array()
+                .ok_or_else(|| worker::Error::RustError("missing parts array".into()))?;
+
+            if upload_id.is_empty() || key.is_empty() || file_path.is_empty() {
+                return Ok(Response::error(
+                    "Bad Request: missing upload_id, key, or file_path",
+                    400,
+                )?
+                .with_headers(cors::headers()?));
+            }
+
+            let uploaded_parts: Vec<UploadedPart> = parts_json
+                .iter()
+                .map(|p| {
+                    UploadedPart::new(
+                        p["n"].as_u64().unwrap_or(0) as u16,
+                        p["etag"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect();
+
+            let bucket = ctx.bucket("FILE_BUCKET")?;
+
+            // Same stale-decision race as the other attach completions: the file
+            // may have been deleted while this uploaded, and its cleanup has
+            // already run. Abort, leaving no object to strand.
+            if db::get_by_path(&ctx, &file_path).await?.is_none() {
+                let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+                let _ = upload.abort().await;
+                return Ok(Response::from_json(&serde_json::json!({
+                    "error": "file_gone",
+                    "message": "源文件已被删除，封面上传已取消。",
+                }))?
+                .with_status(409)
+                .with_headers(cors::headers()?));
+            }
+
+            let upload = bucket.resume_multipart_upload(&key, &upload_id)?;
+            let obj = upload.complete(uploaded_parts).await?;
+            let size = obj.size() as i64;
+
+            match db::set_cover(&ctx, &file_path, Some(&key)).await {
+                Ok(previous) => {
+                    // The row now points at the new object, so the old one is
+                    // only removed if nothing else still names it.
+                    if let Some(old) = previous.filter(|p| p != &key) {
+                        let _ = release_cover_object(&ctx, &old).await?;
+                    }
+                    console_log!("Cover set: {} -> {}", file_path, key);
+                    Ok(Response::from_json(&serde_json::json!({
+                        "ok": true,
+                        "key": key,
+                        "file_path": file_path,
+                        "size": size,
+                    }))?
+                    .with_headers(cors::headers()?))
+                }
+                Err(e) => {
+                    console_log!("Cover D1 update failed, cleaning up R2 object: {:?}", e);
+                    let _ = bucket.delete(&key).await;
+                    Err(e)
+                }
+            }
+        })
+        // GET /admin/api/cover?file_path=... — this file's cover, as a list
+        //
+        // A list of zero or one, because that is the shape `uploadLanded()`
+        // reconciles against for every attach mode. Answering `{cover: {...}}`
+        // here would need a special case in the one function that must not have
+        // one.
+        .get_async("/admin/api/cover", |req, ctx| async move {
+            let _claims = auth::verify_access_jwt(&req, &ctx).await?;
+            let url = req.url()?;
+            let qs: std::collections::HashMap<String, String> =
+                url.query_pairs().into_owned().collect();
+            let file_path = qs.get("file_path").map(|s| s.as_str()).unwrap_or("");
+
+            if file_path.is_empty() {
+                return Ok(Response::error("Bad Request: file_path query param required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+
+            let covers: Vec<serde_json::Value> = match db::get_by_path(&ctx, file_path).await? {
+                Some(f) => f
+                    .cover_key
+                    .map(|k| serde_json::json!({"key": k, "file_path": file_path}))
+                    .into_iter()
+                    .collect(),
+                None => Vec::new(),
+            };
+            Ok(Response::from_json(&serde_json::json!({"covers": covers}))?
+                .with_headers(cors::headers()?))
+        })
+        // POST /admin/api/files/cover — use an existing object, or clear
+        //
+        // `{path, key}` picks one of *this file's own attachments*; `{path}`
+        // with no key clears. Nothing is copied: R2 has no cheap copy, and an
+        // image already in the bucket does not need a second copy to be pointed
+        // at.
+        .post_async("/admin/api/files/cover", |mut req, ctx| async move {
+            let claims = auth::verify_access_jwt(&req, &ctx).await?;
+            console_log!("Cover pick by: {:?}", claims.email);
+
+            let body: serde_json::Value = req.json().await?;
+            let path = body["path"].as_str().unwrap_or("").to_string();
+            let key = body["key"].as_str().unwrap_or("").trim().to_string();
+
+            if path.is_empty() {
+                return Ok(Response::error("Bad Request: path is required", 400)?
+                    .with_headers(cors::headers()?));
+            }
+            if db::get_by_path(&ctx, &path).await?.is_none() {
+                return json_not_found("文件不存在。");
+            }
+
+            if !key.is_empty() {
+                // Scoped to *this path's* attachments, never `attachment_exists`,
+                // which is a global "is this an attachment anywhere". With the
+                // global check a cover could point at another file's object, and
+                // deleting that file would silently blank this one's card — the
+                // same bug class as `promote_key`, one level over.
+                let owned = db::list_attachments(&ctx, &path)
+                    .await?
+                    .into_iter()
+                    .any(|a| a.key == key);
+                if !owned {
+                    return Ok(Response::from_json(&serde_json::json!({
+                        "error": "not_owned",
+                        "message": "只能选用该文件自己的关联文件作为封面。",
+                    }))?
+                    .with_status(400)
+                    .with_headers(cors::headers()?));
+                }
+            }
+
+            let new_key = if key.is_empty() { None } else { Some(key.as_str()) };
+            let previous = db::set_cover(&ctx, &path, new_key).await?;
+            if let Some(old) = previous.filter(|p| Some(p.as_str()) != new_key) {
+                let _ = release_cover_object(&ctx, &old).await?;
+            }
+
+            Ok(Response::from_json(&serde_json::json!({
+                "ok": true,
+                "path": path,
+                "cover_key": new_key,
             }))?
             .with_headers(cors::headers()?))
         })

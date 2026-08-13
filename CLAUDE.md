@@ -595,11 +595,21 @@ target that is not in the file listing.
 
 ### The gallery's notice feed is a button and a modal
 
-The feed is **not** on the page. A single `📢 公告 (N)` button sits under the
-title, and the announcements themselves live in `#notice-modal`. The inline
-version — even capped at three cards with a reveal for the rest — still pushed
-the gallery grid off the first screen, which is the opposite of what the gallery
-is for. The button costs one line whether there are two announcements or forty.
+The feed is **not** on the page. A single `📢 公告 (N)` button rides **inside the
+filter row** (`.filter-row` wraps `.filter-bar` and the launcher), and the
+announcements themselves live in `#notice-modal`. The inline version — even
+capped at three cards with a reveal for the rest — still pushed the gallery grid
+off the first screen, which is the opposite of what the gallery is for, and a
+launcher on a line of its own cost a full band of vertical space above the fold
+for one pill. It now costs nothing whether there are two announcements or forty.
+
+The launcher stays outside the `<nav>` — it is not a filter — and only shares
+the row. Below ~560px the four filter pills already wrap to two lines on their
+own, because finger-sized targets are gated on `(pointer: coarse)`, so a fifth
+control cannot share the line there. That is wrapping, not waste: the space
+between the lines is the row's own `gap`. What must stay true is that there is
+never an *empty* band, which is exactly what an outer margin on `.notice-launcher`
+reintroduces — that margin is what the screenshot of the wasted strip showed.
 
 This replaced a collapse-with-persisted-state design. Do not bring that back:
 the button *is* the collapsed state, and it needs no `localStorage` key, no
@@ -652,6 +662,59 @@ for free. Two rules there:
 The collapse hides `> *:not(h2)` rather than a wrapper element, because wrapping
 would move `#attach-target` and `#attach-label`, which `admin.js` binds at
 module scope.
+
+### Covers live on the `files` row and may be borrowed
+
+Migration 0008 adds `files.cover_key`. A column, not a table: it is exactly one
+image per file, and a `file_covers` table would add a fifth thing keyed on
+`files.path` — a fifth entry in `repoint_file_path`, a fifth
+`delete_*_for_path` — to store one nullable value. Living on the row also means
+**rename cannot detach it**, which is the failure mode every other attached
+thing has to be defended against.
+
+The key may point at either kind of object, and this is the part to get right:
+
+- an object minted by `/admin/api/cover/complete` under `covers/…`, which
+  nothing else names, or
+- **one of the file's own attachments**, when the admin picks an image they had
+  already uploaded. Nothing is copied — R2 has no cheap copy, and an image
+  already in the bucket does not need a second copy of its bytes to be pointed
+  at.
+
+So a cover object is **never deleted unconditionally**. `release_cover_object()`
+asks `attachment_exists`, `proxy_exists` and `cover_ref_count` — three
+membership questions — and only then deletes. Never test the `covers/` prefix:
+it records which uploader minted the object, not who needs it now, exactly as
+`promote` established for `proxies/`.
+
+Three more rules:
+
+- **`POST /admin/api/files/cover` validates the key against *this path's*
+  attachments**, never `attachment_exists`, which is a global "is this an
+  attachment anywhere". With the global check a cover could point at another
+  file's object, and deleting that file would silently blank this card — the
+  same bug class as `promote_key`, one level over.
+- **`/cover/start` refuses a non-image before the bytes move**, using
+  `sanitize_content_type`, which has already dropped `image/svg+xml` — the one
+  image type that can carry script on `/admin`'s origin.
+- **In the delete fan-out the cover goes after the attachment rows are gone**,
+  and this row's own reference is cleared first. Otherwise the reference count
+  it checks still includes the file being deleted, and a cover that *is* one of
+  its attachments would never be released. A failed release counts as stranded,
+  like every other object in that route.
+
+The gallery draws the cover for video and audio (an image is already its own
+thumbnail) with a `.card-kind` badge, so a card with a poster still reads as
+playable, and an `onerror` fallback to the emoji — a picked attachment that was
+not really an image must not leave a blank card. The preview `<video>` also
+takes it as `poster`, which is what stands there when a HEVC file cannot decode.
+
+An attachment is stored `application/octet-stream` whatever it is, so the
+*stored* type cannot tell the picker which attachments are images: it filters on
+the filename extension. A wrong guess costs nothing — the preview fails to load
+and the admin picks another. Verified in a browser that `<img>` renders an
+octet-stream response despite `nosniff`; that header blocks scripts and
+stylesheets with the wrong type, not images.
 
 ### Metrics are counters, and they are a beacon, not a side effect of serving
 

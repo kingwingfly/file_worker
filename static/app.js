@@ -543,15 +543,38 @@ function createCard(file, index) {
   const thumb = document.createElement('div');
   const ct = file.content_type || '';
 
-  if (ct.startsWith('image/')) {
+  // An image is its own thumbnail; video and audio use the admin-set cover if
+  // there is one, and fall back to the emoji placeholder otherwise. The cover
+  // may be one of the file's attachments rather than a `covers/…` object — the
+  // key is all this needs to know, which is why nothing here asks where it came
+  // from.
+  const coverSrc = ct.startsWith('image/')
+    ? `/api/file/${encodePath(file.key)}`
+    : (file.cover_key ? `/api/file/${encodePath(file.cover_key)}` : null);
+  const fallbackEmoji = ct.startsWith('video/') ? '🎬' : ct.startsWith('audio/') ? '🎵' : '✨';
+
+  if (coverSrc) {
     const img = document.createElement('img');
     img.className = 'card-thumb';
-    img.src = `/api/file/${encodePath(file.key)}`;
+    img.src = coverSrc;
     img.alt = displayName(file);
     img.loading = 'lazy';
-    img.onerror = () => { img.outerHTML = placeholderHTML('🖼️'); };
+    // A cover that will not decode — a picked attachment that was not really an
+    // image, a deleted object — must not leave a blank card. The emoji is the
+    // same one the file would have had with no cover at all.
+    img.onerror = () => { img.outerHTML = placeholderHTML(fallbackEmoji); };
     img.onclick = () => openPreview(file);
     thumb.appendChild(img);
+    // Video with a cover still needs to read as video, or the card is
+    // indistinguishable from an image at a glance.
+    if (!ct.startsWith('image/')) {
+      const badge = document.createElement('span');
+      badge.className = 'card-kind';
+      badge.textContent = fallbackEmoji;
+      badge.setAttribute('aria-hidden', 'true');
+      thumb.className = 'card-thumb-wrap';
+      thumb.appendChild(badge);
+    }
   } else if (ct.startsWith('video/')) {
     thumb.className = 'card-thumb placeholder';
     thumb.textContent = '🎬';
@@ -691,6 +714,10 @@ function renderPreviewMedia(file, source) {
     vid.autoplay = true;
     vid.playsInline = true;
     vid.preload = 'metadata';
+    // Shown until the first frame decodes, and left standing if it never does —
+    // which is exactly the HEVC-on-Chrome case, where the alternative is a
+    // black rectangle.
+    if (file.cover_key) vid.poster = `/api/file/${encodePath(file.cover_key)}`;
     // Videos are served as video/mp4 whatever codec is inside, so there is no
     // way to know up front whether this browser can decode them — HEVC plays in
     // Safari everywhere and in Chrome only where the OS supplies a hardware
