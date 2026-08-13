@@ -44,14 +44,20 @@ is no cheap streaming middle ground either.
 Anything the user names is a **path**; anything R2 is asked about is a **key**.
 Mixing them up is the easy bug here.
 
-That is the *code's* vocabulary, and the wire format's — `path` is the field
-name in every request and every table, and renaming it would be a migration
-for nothing. **The UI deliberately does not use it.** R2 has no folders, the
-key is minted separately and never changes, and a `/` in `files.path` only
-groups the listing — so calling the upload field 路径 told the admin they were
-choosing a *location*, when what they are choosing is what the gallery will
-call the file. Every user-facing string says 名称; the input keeps its
-`custom-path` id because that is the field the server reads.
+The UI uses **the same word**, qualified: 逻辑目标路径. Not 路径 alone, which
+told the admin they were choosing a *location* — R2 has no folders, the key is
+minted separately and never changes, and a `/` here only groups the listing.
+Not 名称 either, which was tried and is worse: it hides that the `/` is
+structural, so the hint had to reintroduce the idea the label had just denied.
+逻辑 carries the not-physical distinction that this whole model rests on, and
+keeping 路径 means the migrations, the API and the form all say one thing.
+
+标题 was the other candidate and is wrong twice over: the announcement editor
+already has a 标题 that is a real title, and `files.path` is hierarchical and
+UNIQUE-indexed, which a title is not.
+
+The input keeps its `custom-path` id and `path` stays the wire/table field —
+renaming those would be a migration for nothing.
 
 - Admin routes (`DELETE /admin/api/files/*path`, rename, check-key) take paths and
   resolve to a key via `db::get_by_path` before touching the bucket.
@@ -1011,10 +1017,11 @@ answered by which row was clicked rather than inferred.
 are routinely different — a plain upload is listed under a minted
 `uploads/{day}/…` display name, and an attached upload never becomes a file at
 all — so a queue showing only the names off the admin's disk cannot answer
-"which of these is the proxy for the concert video". The line says *which kind*
-of destination it is, because they are not the same question: `🏷 名称:` for a
-plain upload (what the gallery will call it) and `🎯 目标:` for an attach mode
-(what it hangs off). Three things follow:
+"which of these is the proxy for the concert video". Every row reads 目标 —
+they all answer *where is this going* — and the noun after it says which kind:
+`逻辑目标路径` for a plain upload, `目标文件` for a proxy/related file/cover,
+`目标公告` for announcement media. A bare 目标 on all of them would be one word
+meaning two things a line apart. Three things follow:
 
 - A file upload's path is **exact only once `/start` has answered**. Before
   that it is derivable only when the admin typed one; an empty custom path is

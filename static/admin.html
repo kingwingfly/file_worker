@@ -88,14 +88,16 @@
         <input type="file" id="file-input" accept="image/*,video/*,audio/*" multiple>
       </div>
 
-      <!-- This is `files.path` — the mutable *display name*, not a location.
-           R2 has no folders and the object's real key is minted separately and
-           never changes, so a `/` here only groups the listing. The id stays
+      <!-- This is `files.path` — a *logical* destination, not a location. R2
+           has no folders, the object's real key is minted separately and never
+           changes, and a `/` here only groups the listing. 逻辑目标路径 is the
+           same word the schema uses (`path`), which is the point: one term
+           across the migrations, the API and this field. The id stays
            `custom-path` because that is the field the server reads. -->
       <div class="form-group" id="group-custom-path">
-        <label for="custom-path">🏷 显示名称 (选填)</label>
-        <input type="text" id="custom-path" placeholder="例如: 我的视频.mp4 或 oshi/2024/">
-        <div class="form-hint">留空则自动生成。以 / 结尾时当作分组前缀，后面自动接上原文件名。这只是画廊里显示的名字，不是真实目录，之后随时可以改。</div>
+        <label for="custom-path">🏷 逻辑目标路径 (选填)</label>
+        <input type="text" id="custom-path" placeholder="例如: oshi/2024/ 或 我的视频.mp4">
+        <div class="form-hint">留空则自动生成。这是画廊里的逻辑路径，不是 R2 里的真实位置 —— 对象的存储键单独生成、永不改变。以 / 结尾时当作分组前缀，后面自动接上原文件名；之后随时可改，改的只是这一个字段。</div>
       </div>
 
       <!-- Shared by 代理 and 关联文件: both attach an upload to an existing

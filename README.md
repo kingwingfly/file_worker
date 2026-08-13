@@ -223,13 +223,13 @@ first is still transferring. The picker takes several files at once (all modes
 but 🖼 封面, where one cover per file makes a multi-select meaningless).
 
 Each row names both ends of the transfer — the file off disk, and where its
-bytes are going. For a plain upload that is `🏷 名称: uploads/20678/concert.mp4`,
-the display name the gallery will list it under; for an attach mode it is
-`🎯 目标: concert.mp4 · 360p`, the thing it hangs off. (The upload form asks for
-a 显示名称, not a "path": R2 has no folders, the object's real key is minted
-separately and never changes, and a `/` here only groups the listing.) Each row
-also carries its own progress bar and its own controls: *⏸ 暂停*, *▶ 继续*,
-*取消*. **同时上传** in the queue toolbar sets how many run at once
+bytes are going: `🎯 逻辑目标路径: uploads/20678/concert.mp4` for a plain upload,
+`🎯 目标文件: concert.mp4 · 360p` for a proxy or related file, `🎯 目标公告: …`
+for announcement media. The upload form asks for that same 逻辑目标路径 — the
+`files.path` column, *logical* because R2 has no folders: the object's real key
+is minted separately and never changes, and a `/` here only groups the listing.
+Each row also carries its own progress bar and its own controls: *⏸ 暂停*,
+*▶ 继续*, *取消*. **同时上传** in the queue toolbar sets how many run at once
 — default 2, maximum 4. The cap is not arbitrary: parallel parts divide the
 same upstream, and Cloudflare's edge drops a request body that arrives too
 slowly, so four at once puts each 8 MB part in the timing envelope a 32 MB part

@@ -637,8 +637,8 @@ function taskTarget(task) {
   const spec = attachSpec(task.mode);
   if (!spec) {
     // Exact once /start has answered. Before that it is derivable only when
-    // the admin typed a name: an empty one is minted server-side, and guessing
-    // it here would print a name that is not the one the row gets.
+    // the admin typed one: an empty field is minted server-side, and guessing
+    // it here would print a path that is not the one the row gets.
     if (task.session && task.session.path) return task.session.path;
     if (task.path) return task.path.endsWith('/') ? task.path + taskName(task) : task.path;
     return '自动生成';
@@ -653,16 +653,17 @@ function taskTarget(task) {
   return task.target;
 }
 
-// A plain upload's destination is a *name* — `files.path`, the display name the
-// gallery lists it under — while an attach mode's is a different object
-// entirely. Naming which of the two this row carries is the point: the badge
-// says what kind of upload it is, this says what it will be called or what it
-// hangs off.
+// Every row answers the same question — where is this upload going — so they
+// all read 目标. What differs is the *kind* of destination, and that is the
+// noun after it: a plain upload gets a 逻辑路径 (`files.path`, which R2 knows
+// nothing about), an attach mode gets the object it hangs off. A bare 目标 on
+// both would be one word meaning two things one line apart.
 function taskTargetText(task) {
   const spec = attachSpec(task.mode);
-  if (!spec) return '🏷 名称: ' + taskTarget(task);
+  if (!spec) return '🎯 逻辑目标路径: ' + taskTarget(task);
+  const noun = spec.targetParam === 'announcement_id' ? '目标公告' : '目标文件';
   const label = spec.labelless || !task.label ? '' : ` · ${task.label}`;
-  return '🎯 目标: ' + taskTarget(task) + label;
+  return `🎯 ${noun}: ` + taskTarget(task) + label;
 }
 
 // The announcement modes' rows name their target by title, which arrives after
@@ -1261,12 +1262,12 @@ uploadBtn.addEventListener('click', () => {
     for (const f of files) enqueue(f, { mode, target, label });
   } else {
     const path = customPath.value.trim();
-    // A display name without a trailing slash is the file's whole name, so N
+    // A logical path without a trailing slash is the file's whole path, so N
     // files would all claim it — N-1 guaranteed collisions. With the slash the
     // server treats it as a grouping prefix and appends each filename.
     if (files.length > 1 && path && !path.endsWith('/')) {
       releaseWakeLock();
-      showResult(false, '❌ 一次传多个文件时，显示名称要以 / 结尾（当作分组前缀），或者留空。');
+      showResult(false, '❌ 一次传多个文件时，逻辑目标路径要以 / 结尾（当作分组前缀），或者留空。');
       return;
     }
     for (const f of files) enqueue(f, { mode: 'file', path });
@@ -1860,14 +1861,14 @@ function renameFile(oldPath) {
       <div class="rename-oldpath"></div>
       <label class="rename-label" for="rename-input">新名称</label>
       <input type="text" id="rename-input" autofocus>
-      <div class="rename-hint">只改最后一段，前面的分组前缀保留；连 / 一起输入可以换到别的分组。这只改显示名称，文件本身不会被搬动。</div>
+      <div class="rename-hint">改的是逻辑目标路径的最后一段，前面的分组前缀保留；连 / 一起输入可以换到别的分组。存储键不变，文件本身不会被搬动。</div>
       <div class="rename-dialog-actions">
         <button class="btn-rename-cancel">取消</button>
         <button class="btn-rename-confirm">确认重命名</button>
       </div>
     </div>
   `;
-  overlay.querySelector('.rename-oldpath').textContent = '原名称: ' + oldPath;
+  overlay.querySelector('.rename-oldpath').textContent = '原逻辑目标路径: ' + oldPath;
   document.body.appendChild(overlay);
 
   const input = overlay.querySelector('#rename-input');
