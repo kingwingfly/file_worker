@@ -998,6 +998,30 @@ form's: that input is the enqueue path now, and one file can match two
 abandoned attempts at the same upload, so "which task did you mean" has to be
 answered by which row was clicked rather than inferred.
 
+**A row names its destination, not just its source** (`taskTarget`). The two
+are routinely different — a plain upload lands under a minted
+`uploads/{day}/…` path, and an attached upload never becomes a file at all —
+so a queue showing only the names off the admin's disk cannot answer "which of
+these is the proxy for the concert video". Three things follow:
+
+- A file upload's path is **exact only once `/start` has answered**. Before
+  that it is derivable only when the admin typed one; an empty custom path is
+  minted server-side, and guessing it here would print a path the object never
+  gets. So the row says 自动生成路径 until `session.path` exists, and
+  `renderTask` re-reads it every time rather than caching it.
+- The announcement mode resolves its id to the notice's own title through
+  `noticeData`, which is empty on first paint — hence `refreshTaskTargets()`
+  when the announcement list lands. It branches on `spec.targetParam`, not on
+  the mode name, for the reason in the modes section above.
+- **Adopting stored sessions is the last thing this file does.** It builds
+  rows, a row reads `noticeData`, and `noticeData` is declared far below the
+  queue code — adopting where the queue is defined reads it inside its
+  temporal dead zone and throws before the page has drawn anything.
+
+`spec.labelless` is why 封面 shows no label beside its target: a cover is one
+image per file and its label field is inert, so printing the placeholder would
+be worse than printing nothing.
+
 ## Frontend
 
 Plain HTML/CSS/JS, no build step. Each page is three files:

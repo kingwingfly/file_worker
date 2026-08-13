@@ -301,6 +301,15 @@
   white-space: nowrap;
 }
 
+/* Where the upload is going. Sits between the name and the bar because that
+   is the order the question is asked in — this file, to there. */
+.task-target {
+  font-size: 0.8rem;
+  color: var(--text);
+  margin-bottom: 0.45rem;
+  overflow-wrap: anywhere;
+}
+
 .task-meta {
   font-size: 0.78rem;
   color: var(--text-light);

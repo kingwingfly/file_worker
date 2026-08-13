@@ -222,8 +222,10 @@ next batch can be picked — in another mode, against another target — while t
 first is still transferring. The picker takes several files at once (all modes
 but 🖼 封面, where one cover per file makes a multi-select meaningless).
 
-Each row carries its own progress bar and its own controls: *⏸ 暂停*,
-*▶ 继续*, *取消*. **同时上传** in the queue toolbar sets how many run at once
+Each row names both ends of the transfer — the file off disk and where its
+bytes are going (`→ uploads/2026-08-13/concert.mp4`, `→ concert.mp4 · 360p`,
+`→ 本周直播安排 #12`) — and carries its own progress bar and its own controls:
+*⏸ 暂停*, *▶ 继续*, *取消*. **同时上传** in the queue toolbar sets how many run at once
 — default 2, maximum 4. The cap is not arbitrary: parallel parts divide the
 same upstream, and Cloudflare's edge drops a request body that arrives too
 slowly, so four at once puts each 8 MB part in the timing envelope a 32 MB part

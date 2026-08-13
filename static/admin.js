@@ -89,6 +89,8 @@ const ATTACH_SPECS = {
     labelPlaceholder: '',
     labelMax: 48,
     fallbackLabel: 'cover',
+    // …and therefore nothing for a queue row to print beside its target.
+    labelless: true,
     startUrl: '/admin/api/cover/start',
     completeUrl: '/admin/api/cover/complete',
     listUrl: '/admin/api/cover',
@@ -626,6 +628,43 @@ function taskName(task) {
   return (task.session && task.session.file && task.session.file.name) || '(未知文件)';
 }
 
+// Where this upload is going, as opposed to what it came from. The two are
+// routinely different — a file lands under a minted `uploads/{day}/…` path, and
+// an attached upload does not become a file at all — so a row showing only the
+// name off the admin's disk cannot answer "which of these is the proxy for the
+// concert video".
+function taskTarget(task) {
+  const spec = attachSpec(task.mode);
+  if (!spec) {
+    // Exact once /start has answered. Before that it is derivable only when
+    // the admin typed a path: an empty one is minted server-side, and guessing
+    // it here would print a path that is not the one the object gets.
+    if (task.session && task.session.path) return task.session.path;
+    if (task.path) return task.path.endsWith('/') ? task.path + taskName(task) : task.path;
+    return '自动生成路径';
+  }
+  if (spec.targetParam === 'announcement_id') {
+    // The id is what the server is keyed on, but it is not what the admin
+    // recognises. `noticeData` may still be empty on first paint, hence the
+    // re-render when the announcement list lands.
+    const a = noticeData.find(x => String(x.id) === String(task.target));
+    return a ? noticeOptionText(a) : '公告 #' + task.target;
+  }
+  return task.target;
+}
+
+function taskTargetText(task) {
+  const spec = attachSpec(task.mode);
+  const label = spec && !spec.labelless && task.label ? ` · ${task.label}` : '';
+  return '→ ' + taskTarget(task) + label;
+}
+
+// The announcement modes' rows name their target by title, which arrives after
+// the first paint. Cheap enough to redraw every row rather than track which.
+function refreshTaskTargets() {
+  for (const t of tasks) if (t.els) t.els.target.textContent = taskTargetText(t);
+}
+
 function startTask(task) {
   setState(task, 'starting');
   runTask(task)
@@ -839,13 +878,12 @@ async function transfer(task) {
     clearSession(session.upload_id);
     task.loaded = task.total;
     const doneSpec = attachSpec(task.mode);
-    // An attached upload has no display path of its own — it belongs to a file
-    // or an announcement, and no attach completion returns `path`. The
-    // session's own target is the fallback, and the only thing the
-    // announcement mode can print.
-    task.note = doneSpec
-      ? `${doneSpec.okPrefix} ${sessionAttachLabel(session)} → ${completeData.file_path || sessionAttachTarget(session)}`
-      : `✅ ${completeData.path}`;
+    // Just the verdict. Where it went is on the row's own target line, which
+    // by now holds the path /start actually minted — printing it again here
+    // was the same string twice, and for an attached upload it was the *only*
+    // place the target appeared, which is what this line no longer has to
+    // carry.
+    task.note = doneSpec ? doneSpec.okPrefix : '✅ 上传成功!';
     setState(task, 'done');
     scheduleFilesReload();
 
@@ -1041,6 +1079,11 @@ function buildTaskRow(task) {
   state.className = 'task-state';
   head.append(name, badge, state);
 
+  // Its own line rather than another chip in the head: a path is as long as a
+  // filename, and two long strings on one wrapping row read as one string.
+  const target = document.createElement('div');
+  target.className = 'task-target';
+
   const bar = document.createElement('div');
   bar.className = 'upload-progress';
   const fill = document.createElement('div');
@@ -1076,9 +1119,9 @@ function buildTaskRow(task) {
     resumeTask(task);
   });
 
-  row.append(head, bar, meta, actions, picker);
+  row.append(head, target, bar, meta, actions, picker);
   task.el = row;
-  task.els = { name, badge, state, fill, meta, actions, picker };
+  task.els = { name, badge, state, target, fill, meta, actions, picker };
   taskListEl.append(row);
   taskListEl.hidden = false;
   renderTask(task);
@@ -1105,9 +1148,12 @@ function metaText(task) {
 
 function renderTask(task) {
   if (!task.els) return;
-  const { state, fill, meta, actions } = task.els;
+  const { state, fill, meta, actions, target } = task.els;
   task.el.dataset.state = task.state;
   state.textContent = STATE_TEXT[task.state] || task.state;
+  // Re-read every render: a file upload's path is only exact once /start has
+  // answered, so the row starts on the derived one and settles on the real one.
+  target.textContent = taskTargetText(task);
   const pct = task.state === 'done' ? 100
     : (task.total > 0 ? Math.min(100, Math.round((task.loaded / task.total) * 100)) : 0);
   fill.style.width = pct + '%';
@@ -1424,12 +1470,10 @@ function uploadChunk(task, uploadId, key, partNumber, blob, onProgress) {
   });
 }
 
-// Stored sessions outlive the page, so surface them as tasks on load. There
-// is no File yet, so each one asks for its own file back rather than
-// resuming outright.
-migrateLegacySession();
-for (const s of loadAllSessions()) adoptSession(s);
-renderQueueSummary();
+// Stored sessions are adopted at the *bottom* of this file, not here — a row
+// names its target, and an announcement's title comes from `noticeData`,
+// which is declared further down. Adopting here would read it inside its
+// temporal dead zone and throw before the page had drawn anything.
 
 
 function showResult(success, msg) {
@@ -2450,6 +2494,9 @@ async function loadNotices() {
     // The upload section's target dropdown is fed from this same array, so an
     // announcement created a moment ago is uploadable without a page reload.
     renderAttachTargets();
+    // Queue rows in the announcement mode name their target by title, which
+    // only exists once this array is filled.
+    refreshTaskTargets();
   } catch (err) {
     $('notice-list').replaceChildren(mkNote('admin-error', '❌ 加载失败: ' + err.message));
   } finally {
@@ -2901,3 +2948,12 @@ function mkLabel(text) { const b = document.createElement('b'); b.textContent = 
 // that used to live here was installed *after* the initial loadFiles() call
 // higher up the script, so the proxy section stayed empty until an upload,
 // rename or delete happened to reload the list.
+
+// Stored sessions outlive the page, so surface them as tasks on load. There is
+// no File yet, so each one asks for its own file back rather than resuming
+// outright. Last in the file because a row names its target, and an
+// announcement's title is read from `noticeData` — declared above, but only
+// initialised once this script has run to here.
+migrateLegacySession();
+for (const s of loadAllSessions()) adoptSession(s);
+renderQueueSummary();
