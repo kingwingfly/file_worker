@@ -637,11 +637,11 @@ function taskTarget(task) {
   const spec = attachSpec(task.mode);
   if (!spec) {
     // Exact once /start has answered. Before that it is derivable only when
-    // the admin typed a path: an empty one is minted server-side, and guessing
-    // it here would print a path that is not the one the object gets.
+    // the admin typed a name: an empty one is minted server-side, and guessing
+    // it here would print a name that is not the one the row gets.
     if (task.session && task.session.path) return task.session.path;
     if (task.path) return task.path.endsWith('/') ? task.path + taskName(task) : task.path;
-    return '自动生成路径';
+    return '自动生成';
   }
   if (spec.targetParam === 'announcement_id') {
     // The id is what the server is keyed on, but it is not what the admin
@@ -653,10 +653,16 @@ function taskTarget(task) {
   return task.target;
 }
 
+// A plain upload's destination is a *name* — `files.path`, the display name the
+// gallery lists it under — while an attach mode's is a different object
+// entirely. Naming which of the two this row carries is the point: the badge
+// says what kind of upload it is, this says what it will be called or what it
+// hangs off.
 function taskTargetText(task) {
   const spec = attachSpec(task.mode);
-  const label = spec && !spec.labelless && task.label ? ` · ${task.label}` : '';
-  return '→ ' + taskTarget(task) + label;
+  if (!spec) return '🏷 名称: ' + taskTarget(task);
+  const label = spec.labelless || !task.label ? '' : ` · ${task.label}`;
+  return '🎯 目标: ' + taskTarget(task) + label;
 }
 
 // The announcement modes' rows name their target by title, which arrives after
@@ -1255,12 +1261,12 @@ uploadBtn.addEventListener('click', () => {
     for (const f of files) enqueue(f, { mode, target, label });
   } else {
     const path = customPath.value.trim();
-    // A custom path without a trailing slash is the file's whole name, so N
+    // A display name without a trailing slash is the file's whole name, so N
     // files would all claim it — N-1 guaranteed collisions. With the slash the
-    // server treats it as a directory prefix and appends each filename.
+    // server treats it as a grouping prefix and appends each filename.
     if (files.length > 1 && path && !path.endsWith('/')) {
       releaseWakeLock();
-      showResult(false, '❌ 一次传多个文件时，自定义路径要以 / 结尾（当作目录），或者留空。');
+      showResult(false, '❌ 一次传多个文件时，显示名称要以 / 结尾（当作分组前缀），或者留空。');
       return;
     }
     for (const f of files) enqueue(f, { mode: 'file', path });
@@ -1852,16 +1858,16 @@ function renameFile(oldPath) {
     <div class="rename-dialog">
       <h3>✏️ 重命名文件</h3>
       <div class="rename-oldpath"></div>
-      <label class="rename-label" for="rename-input">新文件名</label>
+      <label class="rename-label" for="rename-input">新名称</label>
       <input type="text" id="rename-input" autofocus>
-      <div class="rename-hint">只改文件名，保留目录路径。输入完整路径可移动到其他目录。</div>
+      <div class="rename-hint">只改最后一段，前面的分组前缀保留；连 / 一起输入可以换到别的分组。这只改显示名称，文件本身不会被搬动。</div>
       <div class="rename-dialog-actions">
         <button class="btn-rename-cancel">取消</button>
         <button class="btn-rename-confirm">确认重命名</button>
       </div>
     </div>
   `;
-  overlay.querySelector('.rename-oldpath').textContent = '原路径: ' + oldPath;
+  overlay.querySelector('.rename-oldpath').textContent = '原名称: ' + oldPath;
   document.body.appendChild(overlay);
 
   const input = overlay.querySelector('#rename-input');
@@ -1879,7 +1885,7 @@ function renameFile(oldPath) {
 
   async function doRename() {
     const newName = input.value.trim();
-    if (!newName) { alert('文件名不能为空'); return; }
+    if (!newName) { alert('名称不能为空'); return; }
     if (newName === filename) { closeDialog(); return; }
 
     // Build new path: replace the last segment (filename) with new name

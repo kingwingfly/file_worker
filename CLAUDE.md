@@ -44,6 +44,15 @@ is no cheap streaming middle ground either.
 Anything the user names is a **path**; anything R2 is asked about is a **key**.
 Mixing them up is the easy bug here.
 
+That is the *code's* vocabulary, and the wire format's — `path` is the field
+name in every request and every table, and renaming it would be a migration
+for nothing. **The UI deliberately does not use it.** R2 has no folders, the
+key is minted separately and never changes, and a `/` in `files.path` only
+groups the listing — so calling the upload field 路径 told the admin they were
+choosing a *location*, when what they are choosing is what the gallery will
+call the file. Every user-facing string says 名称; the input keeps its
+`custom-path` id because that is the field the server reads.
+
 - Admin routes (`DELETE /admin/api/files/*path`, rename, check-key) take paths and
   resolve to a key via `db::get_by_path` before touching the bucket.
 - `/api/file/*key` takes the storage key and does **no** D1 read — that keeps the
@@ -999,15 +1008,18 @@ abandoned attempts at the same upload, so "which task did you mean" has to be
 answered by which row was clicked rather than inferred.
 
 **A row names its destination, not just its source** (`taskTarget`). The two
-are routinely different — a plain upload lands under a minted
-`uploads/{day}/…` path, and an attached upload never becomes a file at all —
-so a queue showing only the names off the admin's disk cannot answer "which of
-these is the proxy for the concert video". Three things follow:
+are routinely different — a plain upload is listed under a minted
+`uploads/{day}/…` display name, and an attached upload never becomes a file at
+all — so a queue showing only the names off the admin's disk cannot answer
+"which of these is the proxy for the concert video". The line says *which kind*
+of destination it is, because they are not the same question: `🏷 名称:` for a
+plain upload (what the gallery will call it) and `🎯 目标:` for an attach mode
+(what it hangs off). Three things follow:
 
 - A file upload's path is **exact only once `/start` has answered**. Before
   that it is derivable only when the admin typed one; an empty custom path is
-  minted server-side, and guessing it here would print a path the object never
-  gets. So the row says 自动生成路径 until `session.path` exists, and
+  minted server-side, and guessing it here would print a name the row never
+  gets. So it says 自动生成 until `session.path` exists, and
   `renderTask` re-reads it every time rather than caching it.
 - The announcement mode resolves its id to the notice's own title through
   `noticeData`, which is empty on first paint — hence `refreshTaskTargets()`
