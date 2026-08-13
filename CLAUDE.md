@@ -593,39 +593,57 @@ and the first upload posts it as an `announcement_id`. `admin.js` also loads
 the announcement list once at startup for that dropdown — it is the one attach
 target that is not in the file listing.
 
-### The gallery's notice feed
+### The gallery's notice feed is a button and a modal
 
-It sits **between the header and the filter bar**, not above the clip rank.
-Anything below the filters competes with the gallery for the first screen, and
-a notice nobody scrolls to is not a notice.
+The feed is **not** on the page. A single `📢 公告 (N)` button sits under the
+title, and the announcements themselves live in `#notice-modal`. The inline
+version — even capped at three cards with a reveal for the rest — still pushed
+the gallery grid off the first screen, which is the opposite of what the gallery
+is for. The button costs one line whether there are two announcements or forty.
 
-Three states, not two, and the difference is what the collapse rules are for:
+This replaced a collapse-with-persisted-state design. Do not bring that back:
+the button *is* the collapsed state, and it needs no `localStorage` key, no
+restore-on-load path and no third "hidden because empty" state to disambiguate.
+The launcher is simply `hidden` when the feed is empty, and the page is then
+exactly what it was before announcements existed.
 
-- **hidden** — the feed is empty, so the section is `hidden` and the page looks
-  exactly as it did before this feature existed.
-- **collapsed** — the viewer shut it. Only *this* is persisted
-  (`zcll.notices.collapsed`), and re-opening **removes** the key rather than
-  storing "expanded". Persisting expanded would mean a viewer who once shut the
-  bar keeps a stale answer forever; persisting collapsed only is the state that
-  is safe to be wrong about.
-- **expanded** — the default, always, for a first-time visitor.
+- **The count on the button is the point.** "公告" alone says nothing about
+  whether anything changed; the number is the only signal a viewer gets without
+  opening it.
+- **Cards are built once, at load, into the hidden dialog.** Images inside carry
+  `loading="lazy"`, so a viewer who never opens the modal never fetches a single
+  announcement image — which only became true once the feed stopped rendering
+  inline.
+- **Three ways out** — close button, backdrop, Escape — and the Escape handler
+  is ordered: the preview modal opens over the notice modal, so it closes first.
+  One Escape, one layer.
+- **The scroll lock is released only if the preview modal is not also open.**
+  Both write `document.body.style.overflow`, and closing the top one blindly
+  would let the page scroll behind the one still open.
+- Focus moves to the close button on open and back to the launcher on close.
+  Without the return, a keyboard user is dropped at the top of the document.
+- The dialog is capped in `dvh` and the list scrolls inside it (`max-height:
+  min(70dvh, 40rem)`), for the reason documented under "Responsive bands": iOS
+  Safari's `vh` is the address-bar-collapsed height, so a `vh`-capped dialog
+  overflows while the bar is showing.
 
-The collapsed bar keeps the **count badge**. That is the whole reason a shut
-section is still visibly different from an empty one: without it, "collapsed"
-and "nothing to say" are the same picture and a new announcement is invisible
-to anyone who ever tapped the chevron.
+The body still renders `white-space: pre-wrap` through `textContent` — the admin
+types into a textarea, so their line breaks are the formatting, and this is the
+same origin as `/admin`, so no Markdown and no linkification. `overflow-wrap:
+anywhere` is still load-bearing: a pasted URL is one unbreakable token, and it
+now sets the *dialog's* min-content rather than the page's.
 
-Long feeds show `NOTICE_PREVIEW_COUNT` (3) cards and offer the rest behind
-`查看全部 N 条`. That control is deliberately styled unlike the section toggle —
-two nested collapses that look alike read as broken — and it is not persisted,
-because it is a "show me more right now", not a preference.
+Dates are **not** parsed with `Date`. D1 writes `datetime('now')`, i.e.
+`YYYY-MM-DD HH:MM:SS` with no zone marker: Safari refuses it and Chrome reads it
+as *local* time, so a shared timestamp would be wrong by the viewer's offset.
+`formatNoticeDate` takes the date part as text, which is the only field a notice
+actually needs.
 
-The admin page has the same mechanism per `.admin-section`, applied from JS
-rather than written into the markup eight times, so a ninth section gets it for
-free instead of being the one that silently does not. Two rules there:
+The admin page keeps its per-section collapse (`.admin-section`), applied from
+JS rather than written into the markup eight times, so a ninth section gets it
+for free. Two rules there:
 
-- **Nothing ever collapses itself.** The stored set only ever grows from a
-  click.
+- **Nothing ever collapses itself.** The stored set only ever grows from a click.
 - **An upload force-opens `#sec-upload`** (`expandUploadSection()`, called from
   `runUpload`). A section collapsed in a previous visit is restored collapsed at
   load, so without this the progress bar, the wake-lock hint and the resume
@@ -634,32 +652,6 @@ free instead of being the one that silently does not. Two rules there:
 The collapse hides `> *:not(h2)` rather than a wrapper element, because wrapping
 would move `#attach-target` and `#attach-label`, which `admin.js` binds at
 module scope.
-
-`.notices` needs `width: 100%` for the reason documented under "Page containers
-need an explicit `width: 100%`" — it is a flex item of a column `body` with
-`margin: 0 auto`, so without it the box is `fit-content`, floored by its widest
-child's min-content. An announcement body is free text that can hold a pasted
-URL, i.e. one unbreakable token, so `overflow-wrap: anywhere` on `.notice-body`
-is load-bearing too. Check it the documented way — a same-origin iframe at
-390px, `documentElement.scrollWidth` vs `innerWidth` — and check it **with a
-long unbroken string in the body**, because short text will not reproduce it.
-
-The body renders `white-space: pre-wrap`: the admin types into a textarea, so
-their line breaks are the formatting. It is `textContent`, never `innerHTML` —
-no Markdown, no linkification. This is the same origin as `/admin`.
-
-Which is why the **body is stored untrimmed** while the title is trimmed: a
-title is one line, so its surrounding space is noise, but the body's leading
-indentation and trailing blank line are things the admin typed and can see. Only
-the both-empty check calls `.trim()`. The update route matters most here — its
-fallback carries `existing.body` through when a title-only patch arrives, so
-trimming there would silently reformat text the request never sent.
-
-Dates are **not** parsed with `Date`. D1 writes `datetime('now')`, i.e.
-`YYYY-MM-DD HH:MM:SS` with no zone marker: Safari refuses it and Chrome reads
-it as *local* time, so a shared timestamp would be wrong by the viewer's offset.
-`formatNoticeDate` takes the date part as text, which is the only field a notice
-actually needs.
 
 ### Metrics are counters, and they are a beacon, not a side effect of serving
 
@@ -726,13 +718,35 @@ busiest files in one response — three queries the admin always wants together,
 where three round trips would be three spinners. `days` is clamped 1–365.
 
 The chart is CSS, not a charting library: this project has no build step and
-the artifact ships no external requests, and two series over at most 90 buckets
-is a flexbox. It scrolls inside its own `overflow-x: auto` box — 90 columns has
-a min-content far past a phone, and the page must not scroll sideways.
+ships no external requests, and two series over at most 90 buckets is a flexbox.
+It scrolls inside its own `overflow-x: auto` box — 90 columns has a min-content
+far past a phone, and the page must not scroll sideways.
 
 Both series share one scale (the tallest single bar). Scaling them
 independently would draw downloads as tall as plays at a tenth the count, which
 is the one thing a two-series chart must not do.
+
+Three rules keep the geometry honest, and the first two exist because breaking
+them produced a bug that read as a browser glitch:
+
+- **The client fills every day in the window**, present in the response or not.
+  The server only returns days that have rows, so a fresh install returned
+  *one* — and one `flex: 1` column fills the whole panel, drawing its two bars
+  as a ~500px half-pink half-blue slab. It was reported as a Safari rendering
+  bug at ~1000px; it was the chart faithfully rendering one very wide day.
+  Filling the range also makes the x-axis mean something: a gap is a quiet day,
+  not a missing column.
+- **Columns are capped (`max-width: 44px`) and the row is `justify-content:
+  flex-start`.** Without both, any short series stretches into slabs again the
+  moment the panel is wide.
+- **No percentage height resolves against a flex-sized box.** `.chart-bars`
+  carries a fixed `height: 120px` so the per-bar `height: N%` set from JS
+  resolves identically everywhere — the same trap documented for `.modal-media`,
+  and the one Safari is strictest about. Do not "simplify" it back to
+  `height: 100%` on the column.
+
+Labels thin to about a dozen across the window; the tooltip still names every
+day exactly, and says UTC.
 
 `overview()` uses scalar subqueries rather than joins for the same reason
 `count_attached` does: they count unrelated things, and a join would multiply

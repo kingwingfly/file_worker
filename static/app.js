@@ -16,8 +16,7 @@ const state = {
   sources: [],
   activeSource: null,
   notices: [],
-  noticesCollapsed: false,
-  noticesExpanded: false,
+  noticeModalOpen: false,
 };
 
 // ── DOM Refs ──
@@ -78,7 +77,11 @@ function init() {
     dom.clipPanel.hidden = true;
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && state.previewOpen) closePreview();
+    if (e.key !== 'Escape') return;
+    // The notice modal opens over the gallery and the preview modal opens over
+    // both, so the topmost one closes first — one Escape, one layer.
+    if (state.previewOpen) closePreview();
+    else if (state.noticeModalOpen) closeNoticeModal();
   });
 
   dom.clipRank = document.getElementById('clip-rank');
@@ -91,15 +94,18 @@ function init() {
   dom.rankTabTime?.addEventListener('click', () => setRankSort('time'));
   dom.rankMore?.addEventListener('click', () => loadRank(false));
 
-  dom.notices = document.getElementById('notices');
+  dom.noticeLauncher = document.getElementById('notice-launcher');
+  dom.noticeOpen = document.getElementById('notice-open');
   dom.noticeFeed = document.getElementById('notice-feed');
-  dom.noticeToggle = document.getElementById('notice-toggle');
   dom.noticeBarCount = document.getElementById('notice-bar-count');
-  dom.noticeShowAll = document.getElementById('notice-showall');
-  dom.noticeToggle?.addEventListener('click', () => setNoticesCollapsed(!state.noticesCollapsed));
-  dom.noticeShowAll?.addEventListener('click', () => {
-    state.noticesExpanded = !state.noticesExpanded;
-    paintNotices();
+  dom.noticeModal = document.getElementById('notice-modal');
+  dom.noticeModalClose = document.getElementById('notice-modal-close');
+  dom.noticeOpen?.addEventListener('click', openNoticeModal);
+  dom.noticeModalClose?.addEventListener('click', closeNoticeModal);
+  dom.noticeModal?.addEventListener('click', (e) => {
+    if (e.target === dom.noticeModal || e.target.classList.contains('modal-backdrop')) {
+      closeNoticeModal();
+    }
   });
 
   // Initial load
@@ -122,50 +128,38 @@ async function loadNotices() {
   } catch (_) { /* the gallery below is unaffected */ }
 }
 
-// How many cards the feed shows before it offers the rest. Three fits above the
-// filter bar without pushing the gallery off the first screen on a phone.
-const NOTICE_PREVIEW_COUNT = 3;
-const NOTICE_COLLAPSED_KEY = 'zcll.notices.collapsed';
-
+// The cards are built once, up front, and live in the modal until it is opened.
+// There is no preview limit and no collapse state any more: the button *is* the
+// collapsed state, and it costs one line of the page whether there are two
+// announcements or forty.
 function renderNotices(items) {
   if (!items.length) return;
   state.notices = items;
-  // Restore *collapsed* only, never expanded. The section is hidden entirely
-  // when there is nothing to say, so "collapsed" and "empty" would otherwise be
-  // the same picture — and a viewer who shut it once would never learn there
-  // was a new announcement. The count in the bar is what keeps a shut section
-  // visibly non-empty.
-  let stored = null;
-  try { stored = localStorage.getItem(NOTICE_COLLAPSED_KEY); } catch (_) { /* private mode */ }
-  setNoticesCollapsed(stored === '1', true);
-  paintNotices();
-  dom.notices.hidden = false;
+  dom.noticeFeed.replaceChildren(...items.map(noticeCard));
+  // The count is what makes the button worth looking at — "公告" alone says
+  // nothing about whether anything changed since last visit.
+  dom.noticeBarCount.textContent = String(items.length);
+  dom.noticeLauncher.hidden = false;
 }
 
-function paintNotices() {
-  const items = state.notices;
-  const shown = state.noticesExpanded ? items : items.slice(0, NOTICE_PREVIEW_COUNT);
-  dom.noticeFeed.replaceChildren(...shown.map(noticeCard));
-  dom.noticeBarCount.textContent = items.length > 1 ? String(items.length) : '';
-
-  // The overflow reveal is deliberately a different control from the section
-  // toggle above — two nested collapses that look alike read as broken.
-  const hiddenCount = items.length - NOTICE_PREVIEW_COUNT;
-  dom.noticeShowAll.hidden = hiddenCount <= 0;
-  dom.noticeShowAll.textContent = state.noticesExpanded
-    ? '收起'
-    : `查看全部 ${items.length} 条公告`;
+function openNoticeModal() {
+  dom.noticeModal.hidden = false;
+  state.noticeModalOpen = true;
+  // Same scroll lock the preview modal uses; without it the gallery scrolls
+  // behind the dialog on every wheel event that reaches the backdrop.
+  document.body.style.overflow = 'hidden';
+  dom.noticeModalClose.focus();
 }
 
-function setNoticesCollapsed(collapsed, restoring) {
-  state.noticesCollapsed = collapsed;
-  dom.notices.classList.toggle('collapsed', collapsed);
-  dom.noticeToggle.setAttribute('aria-expanded', String(!collapsed));
-  if (restoring) return;
-  try {
-    if (collapsed) localStorage.setItem(NOTICE_COLLAPSED_KEY, '1');
-    else localStorage.removeItem(NOTICE_COLLAPSED_KEY);
-  } catch (_) { /* the toggle still works for this page view */ }
+function closeNoticeModal() {
+  dom.noticeModal.hidden = true;
+  state.noticeModalOpen = false;
+  // Only release the lock if the preview modal is not also open — closing this
+  // one from on top of it would otherwise let the page behind scroll.
+  if (!state.previewOpen) document.body.style.overflow = '';
+  // Focus goes back to what opened it, or a keyboard user is dropped at the
+  // top of the document with no idea where they were.
+  dom.noticeOpen.focus();
 }
 
 // Every string here goes in through textContent, and the media below is only

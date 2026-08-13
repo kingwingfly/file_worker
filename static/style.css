@@ -1266,70 +1266,63 @@ body::after {
 
 /* ── Announcements (gallery front page) ── */
 
-/* `width: 100%` for the same reason `.clip-rank` has it: this is a flex item of
-   a column `body`, and `margin: 0 auto` is an auto margin on the cross axis,
-   which switches off `align-items: stretch` and sizes the box `fit-content` —
-   floored by the widest child's *min-content*. An announcement body is free
-   text that can hold a pasted URL, i.e. one unbreakable token, so without this
-   (and the `overflow-wrap` below) a single link widens the whole page and every
-   section overflows a phone sideways. */
-.notices {
-  width: 100%;
-  max-width: 1100px;
-  margin: 0 auto 1.5rem;
-  padding: 0 1rem;
-}
+/* One button, centred under the title. The feed itself lives in a modal, so
+   this is the entire footprint announcements have on the gallery — the inline
+   version pushed the grid off the first screen as soon as there were a few. */
+.notice-launcher { display: flex; justify-content: center; margin: 0 auto 1rem; }
 
-/* The bar is always visible once the feed has anything, collapsed or not: it
-   carries the count, which is the only thing telling a viewer who shut the
-   section that there is something new inside it. */
-.notice-bar { margin-bottom: 0.5rem; }
-
-.notice-toggle {
-  display: flex;
+.notice-open-btn {
+  display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  width: 100%;
-  border: none;
-  background: none;
-  padding: 0.25rem 0;
-  font-family: inherit;
-  font-size: 0.95rem;
-  font-weight: 700;
+  border: 1px solid var(--pink);
+  background: var(--white);
   color: var(--text);
+  border-radius: 999px;
+  padding: 0.4rem 1rem;
+  font-family: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: var(--transition);
 }
-
-.notice-chevron { transition: transform var(--transition); font-size: 0.8rem; color: var(--text-light); }
-.notices.collapsed .notice-chevron { transform: rotate(-90deg); }
-.notices.collapsed #notice-body-wrap { display: none; }
+.notice-open-btn:hover { background: var(--light-pink); }
 
 .notice-bar-count {
-  min-width: 1.4rem;
+  min-width: 1.35rem;
   padding: 0.05rem 0.45rem;
   border-radius: 999px;
   background: var(--pink);
   color: var(--white);
   font-size: 0.72rem;
   font-weight: 700;
+  text-align: center;
 }
 .notice-bar-count:empty { display: none; }
 
-.notice-showall {
-  display: block;
-  width: 100%;
-  margin-top: 0.6rem;
-  padding: 0.45rem;
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--text-light);
-  font-family: inherit;
-  font-size: 0.82rem;
-  cursor: pointer;
-  transition: var(--transition);
+/* The card is narrower than the preview modal's — this one holds text, and a
+   1100px line length is unreadable. The list scrolls inside it, so a long feed
+   never pushes the close button off screen. */
+.notice-modal { align-items: flex-start; overflow-y: auto; padding: 1rem; }
+.notice-modal-card { max-width: 42rem; margin: auto; }
+
+.notice-modal-head {
+  display: flex;
+  align-items: center;
+  padding: 0.9rem 3rem 0.75rem 1.1rem;
+  border-bottom: 1px solid var(--border);
 }
-.notice-showall:hover { border-color: var(--pink); color: var(--text); }
+.notice-modal-head h2 { font-size: 1rem; font-weight: 700; }
+
+.notice-modal .notice-list {
+  overflow-y: auto;
+  padding: 1rem 1.1rem;
+  /* Bounded so the dialog scrolls internally rather than growing past the
+     viewport; `dvh` because iOS Safari's `vh` is the address-bar-collapsed
+     height and would overflow while it is showing. */
+  max-height: min(70dvh, 40rem);
+}
 
 .notice-list { display: flex; flex-direction: column; gap: 0.75rem; }
 

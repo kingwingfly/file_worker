@@ -2121,7 +2121,7 @@ async function loadDashboard() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const d = await resp.json();
     renderStats(d.overview || {});
-    renderDashChart(d.daily || []);
+    renderDashChart(d.daily || [], d.days || dashDays);
     renderDashTop(d.top || []);
     $('dash-updated').textContent = '更新于 ' + new Date().toLocaleTimeString();
   } catch (err) {
@@ -2169,19 +2169,43 @@ function renderStats(o) {
 
 // A CSS bar chart, not a charting library: this page has no build step and no
 // external requests, and two series over at most 90 buckets is a flexbox.
-function renderDashChart(daily) {
+//
+// **Every day in the window gets a column**, present in the data or not. The
+// server only returns days that have rows, so a brand-new install returned one
+// day — and one `flex: 1` column fills the whole panel, which on a wide screen
+// drew its two bars as a 500px-wide half-pink half-blue slab that looked like a
+// rendering bug rather than a chart. Filling the range also makes the x-axis
+// mean something: a gap is a quiet day, not a missing column.
+function renderDashChart(daily, days) {
   const host = $('dash-chart');
   if (!daily.length) {
     host.replaceChildren(mkNote('admin-empty', '这段时间还没有播放或下载记录。'));
     return;
   }
+  const byDay = new Map(daily.map(d => [d.day, d]));
+  const today = new Date();
+  const cols = [];
+  for (let i = days - 1; i >= 0; i--) {
+    // Built in UTC because `date('now')` in D1 is UTC — walking local days
+    // would slide the buckets by the viewer's offset and double- or zero-count
+    // a day at the edge.
+    const d = new Date(Date.UTC(
+      today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - i));
+    const key = d.toISOString().slice(0, 10);
+    cols.push(byDay.get(key) || { day: key, plays: 0, downloads: 0 });
+  }
+
   // Scale to the tallest single bar so the shape is readable; both series share
   // it, or "downloads" would look as big as "plays" at a tenth the count.
-  const peak = Math.max(...daily.map(d => Math.max(d.plays, d.downloads)), 1);
-  host.replaceChildren(...daily.map(d => {
+  const peak = Math.max(...cols.map(d => Math.max(d.plays, d.downloads)), 1);
+  // At 90 buckets a label per column is an unreadable smear, so thin them to
+  // about a dozen. The tooltip still names every day exactly.
+  const step = Math.ceil(cols.length / 12);
+
+  host.replaceChildren(...cols.map((d, i) => {
     const col = document.createElement('div');
     col.className = 'chart-col';
-    col.title = `${d.day} · 播放 ${d.plays} · 下载 ${d.downloads}`;
+    col.title = `${d.day} (UTC) · 播放 ${d.plays} · 下载 ${d.downloads}`;
     const bars = document.createElement('div');
     bars.className = 'chart-bars';
     for (const [cls, v] of [['play', d.plays], ['dl', d.downloads]]) {
@@ -2194,7 +2218,8 @@ function renderDashChart(daily) {
     }
     const lab = document.createElement('div');
     lab.className = 'chart-label';
-    lab.textContent = d.day.slice(5);   // MM-DD; the year is the same all the way across
+    // MM-DD; the year is the same all the way across.
+    lab.textContent = (i % step === 0 || i === cols.length - 1) ? d.day.slice(5) : '';
     col.append(bars, lab);
     return col;
   }));

@@ -750,20 +750,40 @@
 .dash-note { font-size: 0.7rem; color: var(--text-light); font-weight: 400; }
 .dash-legend { margin-top: 0.9rem; }
 
+/* `justify-content: flex-start` and the column cap are what keep a short series
+   looking like a chart: a handful of `flex: 1` columns would otherwise each
+   stretch to a fifth of a 1000px panel and draw as slabs, not bars. */
 .dash-chart {
   display: flex;
   align-items: flex-end;
+  justify-content: flex-start;
   gap: 3px;
-  height: 150px;
   overflow-x: auto;
   padding-bottom: 0.2rem;
 }
-.chart-col { flex: 1 0 18px; display: flex; flex-direction: column; height: 100%; }
-.chart-bars { flex: 1; display: flex; align-items: flex-end; gap: 2px; }
+
+/* No `height: 100%` anywhere in here. A percentage height resolves against the
+   parent's *definite* height, and a flex item sized by `flex: 1` has none —
+   the same trap documented for `.modal-media`, and the one Safari is strictest
+   about. `.chart-bars` therefore carries a fixed pixel height, which is what
+   makes the per-bar `height: N%` set from JS resolve identically everywhere. */
+.chart-col {
+  flex: 1 1 18px;
+  max-width: 44px;
+  display: flex;
+  flex-direction: column;
+}
+.chart-bars {
+  height: 120px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+}
 .chart-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 1px; }
 .chart-bar.play { background: var(--pink); }
 .chart-bar.dl { background: var(--blue); }
 .chart-label {
+  height: 1rem;
   font-size: 0.6rem;
   color: var(--text-light);
   text-align: center;

@@ -23,24 +23,18 @@
     </div>
   </header>
 
-  <!-- Announcements. Directly under the title and above the filter bar: it is
-       the only thing on this page the admin writes, and anything below the
-       filters competes with the gallery for the first screen. Stays hidden
-       until the feed has something, so the page is unchanged with nothing to
-       say — which is why the collapse state below persists *collapsed only*. -->
-  <section class="notices" id="notices" hidden aria-label="公告">
-    <h2 class="notice-bar">
-      <button class="notice-toggle" id="notice-toggle" aria-expanded="true" aria-controls="notice-body-wrap">
-        <span class="notice-chevron" aria-hidden="true">▾</span>
-        <span>📢 公告</span>
-        <span class="notice-bar-count" id="notice-bar-count"></span>
-      </button>
-    </h2>
-    <div id="notice-body-wrap">
-      <div class="notice-list" id="notice-feed"></div>
-      <button class="notice-showall" id="notice-showall" hidden></button>
-    </div>
-  </section>
+  <!-- Announcements are one button, directly under the title. The feed used to
+       render inline here and pushed the gallery off the first screen as soon as
+       there were more than a couple; the content moved into a modal and only
+       the entry point stays on the page. Hidden entirely when there is nothing
+       to say, so the layout is unchanged on a site with no announcements. -->
+  <div class="notice-launcher" id="notice-launcher" hidden>
+    <button class="notice-open-btn" id="notice-open" aria-haspopup="dialog">
+      <span aria-hidden="true">📢</span>
+      <span>公告</span>
+      <span class="notice-bar-count" id="notice-bar-count"></span>
+    </button>
+  </div>
 
   <nav class="filter-bar" aria-label="筛选">
     <button class="filter-btn active" data-filter="all" aria-pressed="true">
@@ -127,6 +121,21 @@
           <a id="clip-page-link" href="#" class="btn-load-more clip-page-link">📝 打开切片页面</a>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Announcement modal. A sibling of the preview modal rather than a reuse of
+       it: that one is torn down and rebuilt per file, this one is rendered once
+       from the feed and just shown. -->
+  <div id="notice-modal" class="modal notice-modal" role="dialog" aria-modal="true"
+       aria-labelledby="notice-modal-title" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-card notice-modal-card">
+      <div class="notice-modal-head">
+        <h2 id="notice-modal-title">📢 公告</h2>
+        <button class="modal-close" id="notice-modal-close" aria-label="关闭">✕</button>
+      </div>
+      <div class="notice-list" id="notice-feed"></div>
     </div>
   </div>
 
