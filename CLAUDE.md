@@ -653,12 +653,40 @@ launcher on a line of its own cost a full band of vertical space above the fold
 for one pill. It now costs nothing whether there are two announcements or forty.
 
 The launcher stays outside the `<nav>` — it is not a filter — and only shares
-the row. Below ~560px the four filter pills already wrap to two lines on their
-own, because finger-sized targets are gated on `(pointer: coarse)`, so a fifth
-control cannot share the line there. That is wrapping, not waste: the space
-between the lines is the row's own `gap`. What must stay true is that there is
-never an *empty* band, which is exactly what an outer margin on `.notice-launcher`
-reintroduces — that margin is what the screenshot of the wasted strip showed.
+the row. Below ~560px it wraps to a line of its own, which is fine: it is alone
+on that line either way, so wrapping it leaves no hole. What must stay true is
+that there is never an *empty* band, which is exactly what an outer margin on
+`.notice-launcher` reintroduces — that margin is what the screenshot of the
+wasted strip showed.
+
+**The four filter pills, though, are one line at every width.** They used to
+wrap on their own below ~560px, and the wrap was 3 + 1: a lone centred pill,
+then the launcher below it, three bands of controls above the fold on a phone —
+201px between the header and the gallery at 390px. A single orphaned pill does
+not read as a row's own `gap`, it reads as broken layout, and it was reported as
+such. So at ≤640px `.filter-bar` is `nowrap` and the pills are `flex: 1 1 0`:
+they share the line evenly at any width, and there is no orphan to centre and no
+breakpoint deciding where the break falls. That is now 115px, two bands.
+
+Three things it rests on:
+
+- **`.filter-bar`'s own horizontal padding is dropped at ≤640**, because it sits
+  inside `.filter-row`'s. 24px of nothing — and 24px is the entire margin
+  between fitting and not fitting at 390px.
+- **`.filter-btn` is `overflow: hidden`** (for its `::after` gradient), so a
+  pill squeezed past its label *clips* it rather than wrapping. That is why the
+  padding is `clamp()`ed rather than a fixed `0.9rem`, and why the check is
+  `scrollWidth > clientWidth` per pill and not a count of rows — counting rows
+  would call a row of cut-off labels a pass. Measured clean down to 320px.
+- **Measure with touch emulation on.** `(pointer: coarse)` is what turns on the
+  40px finger targets; without it you are measuring a desktop window narrowed to
+  phone width, which is not the case anyone reports. `.notice-open-btn` is in
+  that coarse `min-height` list too, so it matches the pills on the rows where
+  they share a line.
+
+Do not add a breakpoint for 320px. `flex: 1 1 0` plus `clamp()` degrades
+continuously, and the three bands in "Responsive bands" are shared with the
+gallery grid.
 
 This replaced a collapse-with-persisted-state design. Do not bring that back:
 the button *is* the collapsed state, and it needs no `localStorage` key, no

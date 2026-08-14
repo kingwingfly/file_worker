@@ -219,7 +219,8 @@ body::after {
 /* The filters and the announcement button share one row. Centred rather than
    pushed to opposite ends: the button is not a filter, but a lone pill floated
    right reads as a page action and drifts miles from the tabs on a wide
-   screen. Wrapping keeps it on a phone. */
+   screen. Below 560px the button wraps to a second line — but the *filters*
+   never do; see the ≤640 block, where they become one full-width row. */
 .filter-row {
   display: flex;
   justify-content: center;
@@ -788,13 +789,33 @@ body::after {
 @media (max-width: 640px) {
   .site-header { padding: 1.4rem 1rem 1.1rem; border-radius: 0 0 28px 28px; }
   .site-title { font-size: 1.4rem; }
-  .filter-bar { padding: 1rem 0.75rem; gap: 0.4rem; }
+  /* The four filters are one row that fills the width, never a wrapped 3 + 1.
+     `.filter-bar`'s own horizontal padding is dropped because it sits inside
+     `.filter-row`'s — 24px of nothing, and 24px is the whole margin between
+     fitting and not at 390px. `nowrap` plus `flex: 1 1 0` then makes the pills
+     share the line evenly at every width, so there is no orphan to centre and
+     no breakpoint deciding where the break falls. */
+  .filter-row { padding: 0.9rem 0.75rem; gap: 0.4rem; }
+  .filter-bar { padding: 0; gap: 0.4rem; flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; }
   .gallery-grid {
     grid-template-columns: 1fr;
     padding: 0 0.75rem 1.5rem;
     gap: 1rem;
   }
-  .filter-btn { padding: 0.4rem 0.9rem; font-size: 0.85rem; }
+  /* `.filter-btn` is `overflow: hidden` for its gradient, so a pill squeezed
+     past its text *clips* rather than wrapping — which is why the padding is
+     fluid rather than a fixed 0.9rem. Measured down to 320px: no clipping. */
+  .filter-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
+    padding: 0.45rem clamp(0.25rem, 2.2vw, 0.9rem);
+    font-size: 0.85rem;
+  }
+  /* The launcher keeps its natural width and wraps to a line of its own when
+     the pills have taken the first — it is the one control here that can wrap
+     without leaving a hole, because it is alone on its line either way. */
+  .notice-launcher { flex: 0 0 auto; }
   /* dvh, not vh: iOS Safari's vh is the *large* viewport, so a 100vh card sits
      partly under the browser chrome until the address bar collapses. */
   .modal-card { max-width: 100vw; max-height: 100dvh; border-radius: 0; }
@@ -818,6 +839,7 @@ body::after {
    compact controls, a 900px-wide tablet should not. */
 @media (pointer: coarse) {
   .filter-btn,
+  .notice-open-btn,
   .btn-download,
   .modal-close,
   .btn-load-more,
